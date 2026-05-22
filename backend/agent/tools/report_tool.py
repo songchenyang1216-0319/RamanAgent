@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from backend.services.llm_service import LLMService
 from backend.services.report_service import generate_methanol_markdown_report
 
@@ -127,6 +129,123 @@ def explain_result_tool(
         return {
             "success": False,
             "explanation": fallback,
+            "structured_explanation": build_structured_prediction_explanation(
+                report_result,
+                professional_analysis=professional_analysis,
+                model_info=model_info,
+                experiment_metadata=experiment_metadata,
+                explanation_text=fallback,
+            ),
             "error_message": explanation,
         }
-    return {"success": True, "explanation": explanation, "error_message": None}
+    return {
+        "success": True,
+        "explanation": explanation,
+        "structured_explanation": build_structured_prediction_explanation(
+            report_result,
+            professional_analysis=professional_analysis,
+            model_info=model_info,
+            experiment_metadata=experiment_metadata,
+            explanation_text=explanation,
+        ),
+        "error_message": None,
+    }
+
+
+def build_structured_prediction_explanation(
+    result: dict[str, Any],
+    professional_analysis: dict | None = None,
+    model_info: dict | None = None,
+    experiment_metadata: dict | None = None,
+    explanation_text: str | None = None,
+) -> dict[str, Any]:
+    """把预测结果整理为前端易于渲染的结构化解释。"""
+    professional_analysis = professional_analysis or {}
+    model_info = model_info or {}
+    experiment_metadata = experiment_metadata or {}
+    confidence = result.get("confidence") or {}
+    disagreement = result.get("model_disagreement") or {}
+    quality = (professional_analysis.get("quality_analysis") or {}).get("metrics") or {}
+    quality_level = (professional_analysis.get("quality_analysis") or {}).get("overall_quality") or "未提供"
+    ood_risk = professional_analysis.get("ood_risk") or {}
+    summary = professional_analysis.get("professional_summary") or {}
+    peak_items = []
+    for peak in ((professional_analysis.get("peak_analysis") or {}).get("peaks") or [])[:5]:
+        label = "未标注"
+        for annotation in peak.get("knowledge_annotations") or []:
+            if annotation.get("label") and annotation.get("label") != "unassigned":
+                label = str(annotation.get("label"))
+                break
+        peak_items.append(
+            {
+                "wavenumber": peak.get("wavenumber"),
+                "intensity": peak.get("intensity"),
+                "label": label,
+            }
+        )
+
+    fusion_prediction = result.get("fusion_prediction")
+    unit = result.get("unit", "")
+    summary_lines = []
+    if fusion_prediction is not None:
+        summary_lines.append(f"本次预测浓度约为 {float(fusion_prediction):.4f}{unit}。")
+    if summary.get("conclusion"):
+        summary_lines.append(str(summary.get("conclusion")))
+    if disagreement.get("message"):
+        summary_lines.append(str(disagreement.get("message")))
+
+    evidence_items = []
+    if confidence.get("status"):
+        evidence_items.append({"label": "置信度状态", "value": str(confidence.get("status"))})
+    if confidence.get("knn_distance") is not None:
+        evidence_items.append({"label": "KNN 距离", "value": f"{float(confidence.get('knn_distance')):.4f}"})
+    if confidence.get("distance_threshold") is not None:
+        evidence_items.append({"label": "距离阈值", "value": f"{float(confidence.get('distance_threshold')):.4f}"})
+    if quality.get("estimated_snr") is not None:
+        evidence_items.append({"label": "估计 SNR", "value": f"{float(quality.get('estimated_snr')):.2f}"})
+    evidence_items.append({"label": "光谱质量", "value": str(quality_level)})
+    if ood_risk.get("level"):
+        evidence_items.append({"label": "分布外风险", "value": str(ood_risk.get("level"))})
+
+    risks = list(summary.get("risks") or [])
+    if disagreement.get("warning"):
+        risks.append("SVR 与 RF 差异达到预警阈值，建议人工复核。")
+    if not risks:
+        risks.append("当前未发现明显高风险信号，但仍建议结合图谱人工复核。")
+
+    suggestions = list(summary.get("suggestions") or [])
+    if not suggestions:
+        suggestions = [
+            "建议结合原始光谱与预处理后图谱复核峰形是否稳定。",
+            "如结果用于关键判断，建议补做重复采样或重复测试。",
+        ]
+
+    return {
+        "summary": summary_lines,
+        "model_comparison": {
+            "fusion_prediction": fusion_prediction,
+            "svr_prediction": result.get("svr_prediction"),
+            "rf_prediction": result.get("rf_prediction"),
+            "absolute_difference": disagreement.get("absolute_difference"),
+            "relative_difference": disagreement.get("relative_difference"),
+            "consistency_message": disagreement.get("message"),
+        },
+        "confidence_analysis": {
+            "status": confidence.get("status"),
+            "knn_distance": confidence.get("knn_distance"),
+            "distance_threshold": confidence.get("distance_threshold"),
+            "quality_level": quality_level,
+            "ood_risk_level": ood_risk.get("level"),
+            "ood_risk_score": ood_risk.get("score"),
+            "evidence_items": evidence_items,
+        },
+        "spectral_features": peak_items,
+        "risks": list(dict.fromkeys(risks)),
+        "suggestions": list(dict.fromkeys(suggestions)),
+        "experiment_metadata": experiment_metadata,
+        "model_info": {
+            "model_name": model_info.get("model_name"),
+            "model_version": model_info.get("model_version"),
+        },
+        "explanation_text": explanation_text or "",
+    }

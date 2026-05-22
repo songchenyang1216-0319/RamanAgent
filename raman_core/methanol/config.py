@@ -13,6 +13,8 @@ PROCESSED_DATA_DIR = DATA_DIR / "processed"
 DEMO_DATA_DIR = DATA_DIR / "demo"
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 FIGURE_DIR = OUTPUT_DIR / "figures"
+PLOT_DIR = OUTPUT_DIR / "plots"
+PREPROCESSED_DIR = OUTPUT_DIR / "preprocessed"
 REPORT_DIR = OUTPUT_DIR / "reports"
 RESULT_DIR = OUTPUT_DIR / "results"
 
@@ -26,6 +28,8 @@ def ensure_dirs() -> None:
         DEMO_DATA_DIR,
         OUTPUT_DIR,
         FIGURE_DIR,
+        PLOT_DIR,
+        PREPROCESSED_DIR,
         REPORT_DIR,
         RESULT_DIR,
     ):

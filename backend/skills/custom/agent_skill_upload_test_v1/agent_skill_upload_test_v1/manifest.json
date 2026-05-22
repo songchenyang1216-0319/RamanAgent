@@ -1,0 +1,39 @@
+{
+  "name": "agent-skill-upload-test",
+  "display_name": "Agent Skill Upload Test",
+  "version": "1.0.0",
+  "description": "A safe diagnostic Skill package for testing whether an Agent can discover, enable, and use an uploaded Skill.",
+  "entrypoint": "SKILL.md",
+  "triggers": [
+    "测试上传Skill",
+    "测试上传skill",
+    "skill-handshake",
+    "Skill握手测试",
+    "使用上传skill自检",
+    "使用上传Skill自检",
+    "agent-skill-upload-test"
+  ],
+  "capabilities": [
+    "skill_discovery_test",
+    "instruction_following_test",
+    "optional_packaged_script_test",
+    "file_reference_test"
+  ],
+  "permissions": {
+    "network": false,
+    "filesystem": "read_only",
+    "dangerous_actions": false
+  },
+  "files": [
+    "SKILL.md",
+    "README.md",
+    "scripts/skill_test.py",
+    "examples/test_prompts.md",
+    "examples/expected_outputs.md"
+  ],
+  "expected_markers": [
+    "SKILL_UPLOAD_TEST_OK_v1",
+    "SKILL_SCRIPT_EXEC_OK_v1"
+  ],
+  "license": "MIT"
+}

@@ -11,7 +11,7 @@ from backend.api.methanol_api import router as methanol_router
 from backend.model_registry.model_registry_router import router as model_registry_router
 from backend.services.model_registry_service import ModelRegistryService
 from backend.services.history_service import init_history_db
-from raman_core.methanol.config import FIGURE_DIR, PROJECT_ROOT, REPORT_DIR, ensure_dirs
+from raman_core.methanol.config import FIGURE_DIR, OUTPUT_DIR, PROJECT_ROOT, REPORT_DIR, ensure_dirs
 
 
 ensure_dirs()
@@ -35,6 +35,7 @@ app.include_router(methanol_router)
 app.include_router(file_router)
 app.include_router(history_router)
 app.include_router(model_registry_router)
+app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 app.mount("/static/figures", StaticFiles(directory=str(FIGURE_DIR)), name="static-figures")
 app.mount("/static/reports", StaticFiles(directory=str(REPORT_DIR)), name="static-reports")
 app.mount("/app", StaticFiles(directory=str(PROJECT_ROOT / "frontend"), html=True), name="frontend-app")

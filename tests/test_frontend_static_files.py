@@ -22,3 +22,6 @@ def test_frontend_references_agent_endpoints():
     assert "/api/agent/chat" in api_text
     assert "chatMessages" in index_text
     assert "professional_analysis" in app_text
+    assert "renderUploadedSkillResult" in app_text
+    assert "前后叠加对比" in app_text
+    assert "结果摘要" in app_text

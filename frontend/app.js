@@ -1,11 +1,14 @@
 import {
-  analyzeFile,
-  chatWithAgent,
   checkCurrentModel,
+  getAgentModels,
   getCurrentModel,
-  getHistoryDetail,
-  listHistory,
+  loadSkills as fetchSkills,
+  sendAgentChat,
+  setActionEnabled as requestSetActionEnabled,
+  setSkillEnabled as requestSetSkillEnabled,
+  switchAgentModel,
   toAssetUrl,
+  uploadSkillZip as requestUploadSkillZip,
 } from "./js/api.js";
 
 const STORAGE_KEYS = {
@@ -13,13 +16,18 @@ const STORAGE_KEYS = {
 };
 
 const state = {
-  currentModel: null,
-  latestAnalysis: null,
   sessionId: loadSessionId(),
+  currentModel: null,
+  modelsPayload: { current_model: "", models: [] },
+  selectedFile: null,
+  skillsPayload: null,
+  expandedSkillNames: new Set(),
   chatBusy: false,
-  analysisBusy: false,
-  figureModalUrl: "",
-  figureModalTitle: "",
+  typingNode: null,
+  initialized: false,
+  modelListOpen: false,
+  refreshingDashboard: false,
+  uploadingSkill: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -32,34 +40,6 @@ function loadSessionId() {
   }
 }
 
-function persistSessionId(sessionId) {
-  state.sessionId = sessionId || "";
-  try {
-    if (state.sessionId) {
-      localStorage.setItem(STORAGE_KEYS.sessionId, state.sessionId);
-    } else {
-      localStorage.removeItem(STORAGE_KEYS.sessionId);
-    }
-  } catch {
-    // ignore storage failures
-  }
-  renderSessionState();
-}
-
-function formatNumber(value, digits = 4) {
-  if (value === null || value === undefined || value === "" || Number.isNaN(Number(value))) {
-    return "未提供";
-  }
-  return Number(value).toFixed(digits);
-}
-
-function formatPercent(value) {
-  if (value === null || value === undefined || value === "" || Number.isNaN(Number(value))) {
-    return "未提供";
-  }
-  return `${(Number(value) * 100).toFixed(2)}%`;
-}
-
 function escapeHtml(text) {
   return String(text ?? "")
     .replace(/&/g, "&amp;")
@@ -69,826 +49,1250 @@ function escapeHtml(text) {
     .replace(/'/g, "&#39;");
 }
 
-function renderMarkdown(markdownText) {
-  const escaped = escapeHtml(markdownText || "未生成解释。");
-  const lines = escaped.split(/\r?\n/);
-  const parts = [];
-  let inList = false;
+function buildNowText() {
+  const now = new Date();
+  return `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+}
 
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line) {
-      if (inList) {
-        parts.push("</ul>");
-        inList = false;
-      }
-      continue;
+function persistSessionId(sessionId) {
+  state.sessionId = sessionId || "";
+  try {
+    if (state.sessionId) {
+      localStorage.setItem(STORAGE_KEYS.sessionId, state.sessionId);
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.sessionId);
     }
-    if (line.startsWith("### ")) {
-      if (inList) {
-        parts.push("</ul>");
-        inList = false;
-      }
-      parts.push(`<h3>${line.slice(4).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</h3>`);
-      continue;
-    }
-    if (line.startsWith("## ")) {
-      if (inList) {
-        parts.push("</ul>");
-        inList = false;
-      }
-      parts.push(`<h2>${line.slice(3).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</h2>`);
-      continue;
-    }
-    if (line.startsWith("- ")) {
-      if (!inList) {
-        parts.push("<ul>");
-        inList = true;
-      }
-      parts.push(`<li>${line.slice(2).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</li>`);
-      continue;
-    }
-    if (inList) {
-      parts.push("</ul>");
-      inList = false;
-    }
-    parts.push(`<p>${line.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</p>`);
+  } catch {
+    // ignore
   }
-
-  if (inList) {
-    parts.push("</ul>");
+  const target = $("sessionIdText");
+  if (target) {
+    target.textContent = state.sessionId || "未创建";
   }
-  return parts.join("");
 }
 
-function renderList(items, emptyText = "暂无") {
-  if (!Array.isArray(items) || items.length === 0) {
-    return `<p class="muted">${escapeHtml(emptyText)}</p>`;
+function setChatStatus(text) {
+  const node = $("chatStatus");
+  if (node) {
+    node.textContent = text || "";
   }
-  return `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
 }
 
-function renderKeyValue(container, rows) {
-  container.innerHTML = rows
-    .map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value ?? "未提供")}</strong></div>`)
-    .join("");
-}
-
-function renderJsonDetails(title, value) {
-  return `<details><summary>${escapeHtml(title)}</summary><pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre></details>`;
-}
-
-function setBadge(element, text, type = "neutral") {
-  element.textContent = text;
-  element.className = `badge ${type}`;
-}
-
-function setError(message) {
-  $("errorText").textContent = message || "";
-}
-
-function setChatStatus(message) {
-  $("chatStatus").textContent = message || "";
-}
-
-function setAnalysisProgress(message) {
-  $("analysisProgress").textContent = message || "";
-}
-
-function setHistoryStatus(message) {
-  $("historyStatus").textContent = message || "";
-}
-
-function renderSessionState() {
-  $("sessionIdText").textContent = state.sessionId || "未创建";
-}
-
-function normalizeErrorMessage(message, context = "") {
-  const text = `${message || ""} ${context || ""}`.toLowerCase();
-  if (text.includes("siliconflow_api_key") || text.includes("未配置") || text.includes("api key")) {
-    return "当前大模型服务还没有配置好，所以页面会自动切换到本地兜底回复。";
+function autoResizeTextarea() {
+  const textarea = $("messageInput");
+  if (!textarea) {
+    return;
   }
-  if (text.includes("csv") || text.includes("文件格式") || text.includes("只支持")) {
-    return "文件格式可能不对，请确认上传的是 `.csv` 文件，而且内容是两列光谱数据。";
-  }
-  if (text.includes("缺少模型") || text.includes("模型文件") || text.includes("工件")) {
-    return "模型文件还没准备完整，当前分析暂时无法继续。可以先检查模型文件是否齐全。";
-  }
-  if (text.includes("failed to fetch") || text.includes("network") || text.includes("后端") || text.includes("连接")) {
-    return "后端暂时没有连上，请确认服务已经启动后再试一次。";
-  }
-  if (!message) {
-    return "请求失败了，请稍后重试。";
-  }
-  return String(message);
+  textarea.style.height = "auto";
+  textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
 }
 
-function createChatMessage(role, title, content, meta = "", extra = "") {
-  return `
-    <div class="chat-head">
-      <span class="chat-role">${escapeHtml(title)}</span>
-      ${meta ? `<span class="muted">${escapeHtml(meta)}</span>` : ""}
-    </div>
-    <div class="chat-content">${content}</div>
-    ${extra}
-  `;
+function getChatRequestTimeout({ hasFile, message }) {
+  if (hasFile) {
+    return 90000;
+  }
+  const text = String(message || "").toLowerCase();
+  if (
+    text.includes("预处理") ||
+    text.includes("预测") ||
+    text.includes("分析") ||
+    text.includes("画图") ||
+    text.includes("基线") ||
+    text.includes("去噪")
+  ) {
+    return 60000;
+  }
+  return 15000;
 }
 
-function appendChatMessage(role, title, content, meta = "", extra = "") {
-  const message = document.createElement("div");
-  message.className = `chat-message ${role}`;
-  message.innerHTML = createChatMessage(role, title, content, meta, extra);
-  $("chatMessages").appendChild(message);
-  $("chatMessages").scrollTop = $("chatMessages").scrollHeight;
-  return message;
+function scrollToBottom() {
+  const container = $("chatMessages");
+  if (!container) {
+    return;
+  }
+  window.requestAnimationFrame(() => {
+    window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+  });
 }
 
-function replaceChatMessage(node, role, title, content, meta = "", extra = "") {
-  if (!node) {
-    return appendChatMessage(role, title, content, meta, extra);
-  }
-  node.className = `chat-message ${role}`;
-  node.innerHTML = createChatMessage(role, title, content, meta, extra);
-  $("chatMessages").scrollTop = $("chatMessages").scrollHeight;
-  return node;
-}
-
-function renderChatPayload(response) {
-  const metaParts = [
-    response.category ? `category: ${response.category}` : "",
-    response.intent ? `intent: ${response.intent}` : "",
-    response.tool_used ? `tool: ${response.tool_used}` : "",
-  ].filter(Boolean);
-
-  const data = response.data || {};
-  const dataSection = renderChatData(data);
-  const nextAction = response.next_action ? `<p class="muted">${escapeHtml(response.next_action)}</p>` : "";
-  const note = response.llm_note ? `<p class="muted">${escapeHtml(response.llm_note)}</p>` : "";
-  const debugHtml = response._debug_html || "";
-
-  return `
-    <p>${escapeHtml(response.reply || "")}</p>
-    <div class="chat-meta">${escapeHtml(metaParts.join(" · "))}</div>
-    ${dataSection}
-    ${nextAction}
-    ${note}
-    ${debugHtml}
-  `;
-}
-
-function renderChatData(data) {
-  if (!data || (typeof data === "object" && Object.keys(data).length === 0)) {
-    return "";
-  }
-  if (data.model_version) {
-    return `
-      <div class="compact-data">
-        <strong>${escapeHtml(data.model_version)}</strong>
-        <span>${escapeHtml(data.model_name || data.task || "")}</span>
-        <span>${escapeHtml((data.algorithm || []).join(", "))}</span>
-      </div>
-    `;
-  }
-  if (data.final_prediction !== undefined || data.fusion_prediction !== undefined) {
-    return `
-      <div class="compact-data">
-        <strong>融合预测值：${escapeHtml(formatNumber(data.final_prediction ?? data.fusion_prediction))}</strong>
-        <span>SVR：${escapeHtml(formatNumber(data.svr_prediction))} · RF：${escapeHtml(formatNumber(data.rf_prediction))}</span>
-      </div>
-    `;
-  }
-  if (Array.isArray(data.items)) {
-    return `
-      <div class="compact-data">
-        ${data.items
-          .slice(0, 3)
-          .map((item) => `<span>${escapeHtml(item.sample_file || item.task_id || "")} ${escapeHtml(formatNumber(item.final_prediction ?? item.fusion_prediction))}</span>`)
-          .join("")}
-      </div>
-    `;
-  }
-  if (data.missing_files) {
-    return `<div class="compact-data"><strong>缺失 ${data.missing_files.length} 个文件</strong><span>${escapeHtml(data.message || "")}</span></div>`;
-  }
-  return renderJsonDetails("核心数据", data);
-}
-
-function setChatBusy(isBusy, text = "正在思考...") {
+function setBusy(isBusy, hint = "正在处理中...") {
   state.chatBusy = isBusy;
-  $("sendChatBtn").disabled = isBusy;
-  $("chatInput").disabled = isBusy;
-  $("chatDebug").disabled = isBusy;
-  setChatStatus(isBusy ? text : state.sessionId ? `当前会话：${state.sessionId}` : "尚未创建会话");
+  const sendButton = $("sendButton");
+  const fileButton = $("fileButton");
+  const messageInput = $("messageInput");
+  const chatDebug = $("chatDebug");
+  if (sendButton) {
+    sendButton.disabled = isBusy;
+  }
+  if (fileButton) {
+    fileButton.disabled = isBusy;
+  }
+  if (messageInput) {
+    messageInput.disabled = isBusy;
+  }
+  if (chatDebug) {
+    chatDebug.disabled = isBusy;
+  }
+  setChatStatus(isBusy ? hint : state.sessionId ? `当前会话：${state.sessionId}` : "可以直接提问，或上传 CSV 后发送。");
 }
 
-function setAnalysisBusy(isBusy, text = "正在分析...") {
-  state.analysisBusy = isBusy;
-  $("analyzeBtn").disabled = isBusy;
-  $("csvFile").disabled = isBusy;
-  setAnalysisProgress(isBusy ? text : "");
-}
-
-function normalizeFigureValue(value, fallbackLabel, index) {
-  if (value === null || value === undefined || value === "") {
+function appendMessage(role, html, type = "text", meta = buildNowText()) {
+  const container = $("chatMessages");
+  if (!container) {
     return null;
   }
-  if (typeof value === "string") {
-    return { label: fallbackLabel || `图谱 ${index + 1}`, url: value };
-  }
-  if (Array.isArray(value)) {
-    return value.flatMap((item, childIndex) => {
-      const normalized = normalizeFigureValue(item, `${fallbackLabel || "图谱"}-${childIndex + 1}`, childIndex);
-      return Array.isArray(normalized) ? normalized.filter(Boolean) : normalized ? [normalized] : [];
-    });
-  }
-  if (typeof value === "object") {
-    return {
-      label: value.label || value.name || fallbackLabel || `图谱 ${index + 1}`,
-      url: value.url || value.href || value.path || value.value || "",
-    };
-  }
-  return { label: fallbackLabel || `图谱 ${index + 1}`, url: String(value) };
-}
 
-function flattenFigureEntries(source) {
-  if (!source) {
-    return [];
-  }
-  if (Array.isArray(source)) {
-    return source.flatMap((item, index) => {
-      const normalized = normalizeFigureValue(item, `图谱 ${index + 1}`, index);
-      return Array.isArray(normalized) ? normalized.filter(Boolean) : normalized ? [normalized] : [];
-    });
-  }
-  if (typeof source === "object") {
-    return Object.entries(source).flatMap(([key, value], index) => {
-      if (Array.isArray(value)) {
-        return value.flatMap((item, childIndex) => {
-          const normalized = normalizeFigureValue(item, `${key}-${childIndex + 1}`, childIndex);
-          return Array.isArray(normalized) ? normalized.filter(Boolean) : normalized ? [normalized] : [];
-        });
-      }
-      const normalized = normalizeFigureValue(value, key, index);
-      return Array.isArray(normalized) ? normalized.filter(Boolean) : normalized ? [normalized] : [];
-    });
-  }
-  return [];
-}
-
-function normalizeFigureEntries(payload) {
-  return flattenFigureEntries(payload.figure_urls || payload.web_urls?.figures || payload.result?.figure_urls || payload.result?.figures || {});
-}
-
-function openFigureModal(url, title) {
-  state.figureModalUrl = url;
-  state.figureModalTitle = title || "图谱预览";
-  $("figureModalTitle").textContent = state.figureModalTitle;
-  $("figureModalImage").src = url;
-  $("figureModalOpenLink").href = url;
-  $("figureModal").classList.remove("hidden");
-}
-
-function closeFigureModal() {
-  $("figureModal").classList.add("hidden");
-  $("figureModalImage").src = "";
-  $("figureModalOpenLink").href = "#";
-  state.figureModalUrl = "";
-  state.figureModalTitle = "";
-}
-
-function renderAnalysisSnapshot(payload) {
-  const result = payload.result || {};
-  const professional = payload.professional_analysis || {};
-  const summary = professional.professional_summary || {};
-  const quality = professional.quality_analysis || {};
-  const baseline = professional.baseline_analysis || {};
-  const ood = summary.ood_risk || professional.ood_risk || {};
-  const risks = (summary.risks || []).slice(0, 3);
-
-  const qualityLabel = quality.overall_quality || quality.quality_level || "未评估";
-  const confidenceText = result.confidence?.status || "未提供";
-  const predictionText = `${formatNumber(result.final_prediction ?? result.fusion_prediction)} ${result.unit || ""}`.trim();
-  const oodText = ood.level ? `${ood.level} / ${formatNumber(ood.score, 2)}` : "未评估";
-
-  $("analysisSnapshot").innerHTML = [
-    ["融合预测值", predictionText || "未提供"],
-    ["可信度", confidenceText],
-    ["光谱质量", `${qualityLabel}${quality.score !== undefined ? ` · ${formatNumber(quality.score, 2)}` : ""}`],
-    ["基线状态", baseline.baseline_level || "未提供"],
-    ["OOD 风险", oodText],
-    ["关键风险", risks.length ? risks.join("；") : "暂无明显风险"],
-  ]
-    .map(([label, value]) => `<div class="snapshot-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`)
-    .join("");
-}
-
-function renderPrediction(result) {
-  const disagreement = result.model_disagreement || {};
-  const confidence = result.confidence || {};
-  const unit = result.unit || "%";
-  $("predictionCards").innerHTML = [
-    ["融合预测值", `${formatNumber(result.final_prediction ?? result.fusion_prediction)} ${unit}`],
-    ["SVR 预测值", `${formatNumber(result.svr_prediction)} ${unit}`],
-    ["RF 预测值", `${formatNumber(result.rf_prediction)} ${unit}`],
-    ["模型一致性", disagreement.warning ? "需要关注" : "一致性较好"],
-    ["绝对差异", formatNumber(disagreement.absolute_difference)],
-    ["相对差异", formatPercent(disagreement.relative_difference)],
-    ["可信度", confidence.status || "未提供"],
-    ["近邻距离", formatNumber(confidence.knn_distance)],
-  ]
-    .map(([label, value]) => `<div class="metric-card"><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`)
-    .join("");
-  $("pipelineText").textContent = Array.isArray(result.pipeline) ? result.pipeline.join(" → ") : "";
-}
-
-function renderProfessionalAnalysis(analysis = {}) {
-  const summary = analysis.professional_summary || {};
-  const quality = analysis.quality_analysis || {};
-  const qualityMetrics = quality.metrics || {};
-  const baseline = analysis.baseline_analysis || {};
-  const baselineMetrics = baseline.metrics || {};
-  const peaks = (analysis.peak_analysis || {}).peaks || [];
-  const similar = (analysis.similarity_analysis || {}).similar_records || [];
-
-  const summaryLevel = summary.overall_level || "未生成";
-  setBadge(
-    $("overallLevel"),
-    summaryLevel,
-    summaryLevel === "poor" ? "error" : summaryLevel === "acceptable" ? "warning" : "success"
-  );
-  $("professionalSummary").innerHTML = `
-    <h3>结论</h3>
-    <p>${escapeHtml(summary.conclusion || "当前未生成综合结论。")}</p>
-    <h3>关键发现</h3>
-    ${renderList(summary.key_findings || summary.key_evidence, "当前未生成关键发现")}
-    <h3>风险</h3>
-    ${renderList(summary.risks, "暂无明显风险")}
-    <h3>建议</h3>
-    ${renderList(summary.suggestions, "暂无额外建议")}
+  const row = document.createElement("div");
+  row.className = `message-row ${role} ${type === "error" ? "error" : ""}`.trim();
+  row.innerHTML = `
+    <article class="message-bubble">
+      <div class="message-meta">
+        <span class="message-role">${role === "user" ? "用户" : role === "assistant" ? "Assistant" : "系统"}</span>
+        <span class="message-time">${escapeHtml(meta)}</span>
+      </div>
+      <div class="message-content">${html}</div>
+    </article>
   `;
-
-  renderKeyValue($("qualityBox"), [
-    ["质量等级", quality.overall_quality || quality.quality_level],
-    ["质量分", formatNumber(quality.score, 2)],
-    ["估计信噪比", formatNumber(qualityMetrics.estimated_snr)],
-    ["基线漂移分", formatNumber(qualityMetrics.baseline_drift_score)],
-    ["峰尖锐度", formatNumber(qualityMetrics.peak_sharpness_score)],
-    ["异常点比例", formatPercent(qualityMetrics.outlier_ratio)],
-  ]);
-
-  renderKeyValue($("baselineBox"), [
-    ["基线等级", baseline.baseline_level],
-    ["回归适用", baseline.regression_suitability],
-    ["漂移评分", formatNumber(baselineMetrics.baseline_drift_score)],
-    ["负峰风险", baseline.negative_peak_risk ? "是" : "否"],
-    ["峰形削弱", baseline.peak_weakening_risk ? "是" : "否"],
-    ["过校正风险", baseline.over_subtraction_risk ? "是" : "否"],
-  ]);
-
-  $("peaksTable").innerHTML = peaks.length
-    ? `<table><thead><tr><th>rank</th><th>峰位</th><th>强度</th><th>prominence</th><th>说明</th></tr></thead><tbody>${peaks
-        .slice(0, 8)
-        .map((peak) => {
-          const annotation = (peak.knowledge_annotations || []).find((item) => item.confidence !== "unknown");
-          const label = annotation ? `${annotation.label}${annotation.possible_mode ? ` · ${annotation.possible_mode}` : ""}` : "未匹配内置知识库";
-          return `<tr><td>${peak.rank}</td><td>${formatNumber(peak.wavenumber)}</td><td>${formatNumber(peak.intensity)}</td><td>${formatNumber(peak.prominence)}</td><td>${escapeHtml(label)}</td></tr>`;
-        })
-        .join("")}</tbody></table>`
-    : `<p class="muted">当前未生成主要峰分析。</p>`;
-
-  $("similarRecords").innerHTML = similar.length
-    ? `<table><thead><tr><th>样品</th><th>预测值</th><th>差异</th><th>时间</th></tr></thead><tbody>${similar
-        .map(
-          (item) =>
-            `<tr><td>${escapeHtml(item.sample_file || "")}</td><td>${formatNumber(item.final_prediction)}</td><td>${formatNumber(item.difference)}</td><td>${escapeHtml(item.created_at || "")}</td></tr>`
-        )
-        .join("")}</tbody></table>`
-    : `<p class="muted">暂无预测浓度接近的历史记录。</p>`;
+  container.appendChild(row);
+  scrollToBottom();
+  return row;
 }
 
-function renderModelInfo(modelInfo = {}) {
-  const training = modelInfo.training_data || {};
-  const artifactCheck = modelInfo.artifact_check || {};
-  const missingCount = (artifactCheck.missing_files || []).length;
-  const fallbackCount = (artifactCheck.fallback_files || []).length;
-  renderKeyValue($("modelInfoBox"), [
-    ["模型版本", modelInfo.model_version],
-    ["模型名称", modelInfo.model_name],
-    ["目标任务", modelInfo.task || modelInfo.target],
-    ["单位", modelInfo.unit],
-    ["算法组成", (modelInfo.algorithm || []).join(", ")],
-    ["样本数量", training.sample_count],
-    ["浓度范围", Array.isArray(training.concentration_range) ? training.concentration_range.join(" - ") : "未提供"],
-    ["模型文件", missingCount ? `缺失 ${missingCount} 个` : fallbackCount ? `兼容加载 ${fallbackCount} 个` : "检查通过"],
-  ]);
+function appendFileCard(file) {
+  if (!file) {
+    return;
+  }
+  appendMessage(
+    "user",
+    `<div class="file-card"><strong>CSV</strong><span>${escapeHtml(file.name)}</span></div>`,
+    "text",
+  );
 }
 
-function renderExperimentInfo(metadata = {}) {
-  renderKeyValue($("experimentInfoBox"), [
-    ["样品名", metadata.sample_name],
-    ["样品类型", metadata.sample_type],
-    ["操作人", metadata.operator],
-    ["仪器", metadata.instrument],
-    ["激光功率", metadata.laser_power],
-    ["积分时间", metadata.integration_time],
-    ["备注", metadata.remarks],
-  ]);
+function renderTypingMessage(text = "正在处理，请稍候...") {
+  removeTypingMessage();
+  state.typingNode = appendMessage(
+    "assistant",
+    `<p>${escapeHtml(text)}</p><div class="typing-dots"><span></span><span></span><span></span></div>`,
+    "text",
+    "处理中",
+  );
 }
 
-function renderFiguresAndReport(payload) {
-  const entries = normalizeFigureEntries(payload);
-  const reportView = payload.web_urls?.report_view ? toAssetUrl(payload.web_urls.report_view) : "";
-  const reportDownload = payload.web_urls?.report_download ? toAssetUrl(payload.web_urls.report_download) : "";
-  const reportHtml = `${reportView ? `<a href="${escapeHtml(reportView)}" target="_blank" rel="noopener noreferrer">查看报告</a>` : ""}${reportDownload ? `<a href="${escapeHtml(reportDownload)}" target="_blank" rel="noopener noreferrer">下载报告</a>` : ""}`;
-  $("reportLinks").innerHTML = payload.report
-    ? reportHtml || `<span class="muted">报告已生成，但当前没有可访问的链接。</span>`
-    : `<span class="muted">暂无报告</span>`;
+function removeTypingMessage() {
+  if (state.typingNode) {
+    state.typingNode.remove();
+    state.typingNode = null;
+  }
+}
 
-  if (!entries.length) {
-    $("figureGrid").innerHTML = `<div class="history-empty">暂无图谱数据。</div>`;
+function renderWelcomeMessage() {
+  const container = $("chatMessages");
+  if (!container) {
+    return;
+  }
+  container.innerHTML = "";
+  appendMessage(
+    "system",
+    [
+      "<p>欢迎使用聊天式 RamanAgent。</p>",
+      "<p>你可以直接提问，也可以点击左下角的 <strong>+</strong> 上传 CSV 光谱文件，然后继续发送分析请求。</p>",
+      "<p>常见用法：<span class=\"inline-chip\">最近实验</span> <span class=\"inline-chip\">模型列表</span> <span class=\"inline-chip\">Skills 管理</span></p>",
+    ].join(""),
+    "text",
+    state.sessionId ? `已恢复 ${state.sessionId}` : "新会话",
+  );
+}
+
+function getSkillIcon(category, source) {
+  if (source === "uploaded") return "⬆";
+  const text = String(category || "");
+  if (text.includes("数据")) return "文";
+  if (text.includes("预处理")) return "净";
+  if (text.includes("基线")) return "线";
+  if (text.includes("去噪")) return "稳";
+  if (text.includes("模型")) return "模";
+  if (text.includes("可视化")) return "图";
+  if (text.includes("报告")) return "报";
+  if (text.includes("系统")) return "系";
+  if (text.includes("对话")) return "聊";
+  return "技";
+}
+
+function renderSkillsButton(payload = state.skillsPayload) {
+  const target = $("skillsButtonCount");
+  if (!target) {
+    return;
+  }
+  const total = Number(payload?.total || 0);
+  target.textContent = total > 0 ? `${total} 个` : "0 个";
+}
+
+function renderSkillsButtonError(error) {
+  console.error("加载 Skills 失败：", error);
+  const target = $("skillsButtonCount");
+  if (target) {
+    target.textContent = "失败";
+  }
+  renderSkillsPanel({
+    total: 0,
+    enabled_count: 0,
+    available_count: 0,
+    skills: [],
+    error: error?.message || String(error || "Skill 列表加载失败"),
+  });
+}
+
+function renderSkillToggleButton(skill) {
+  const canToggle = Boolean(skill.available) && skill.source !== "uploaded";
+  const nextEnabled = !skill.enabled;
+  return `
+    <button
+      type="button"
+      class="skill-toggle-button"
+      data-toggle-skill-enabled="${escapeHtml(skill.name || "")}"
+      data-next-enabled="${String(nextEnabled)}"
+      ${canToggle ? "" : "disabled"}
+    >
+      ${skill.enabled ? "禁用" : "启用"}
+    </button>
+  `;
+}
+
+function renderActionToggleButton(skillName, action) {
+  const canToggle = action.available || !action.enabled;
+  const nextEnabled = !action.enabled;
+  return `
+    <button
+      type="button"
+      class="skill-toggle-button small"
+      data-toggle-action-enabled="${escapeHtml(skillName || "")}"
+      data-action-name="${escapeHtml(action.name || "")}"
+      data-next-enabled="${String(nextEnabled)}"
+      ${canToggle ? "" : "disabled"}
+    >
+      ${action.enabled ? "禁用" : "启用"}
+    </button>
+  `;
+}
+
+function renderActionSourceLine(action) {
+  return `
+    <div class="skill-source-line">
+      <span class="skill-source-badge">${escapeHtml(action.skill_name || "")}</span>
+    </div>
+  `;
+}
+
+function renderSkillActions(actions = []) {
+  if (!actions.length) {
+    return `<div class="skills-empty">当前没有可展示的子能力。</div>`;
+  }
+  return actions
+    .map(
+      (action) => `
+        <div class="skill-action-item">
+          <h4>${escapeHtml(action.display_name || action.name || "未命名 action")}</h4>
+          <p class="skill-action-tech">${escapeHtml(action.name || "")}</p>
+          <p class="skill-action-desc">${escapeHtml(action.description || "暂无描述")}</p>
+          ${renderActionSourceLine(action)}
+          <div class="skill-statuses">
+            <span class="skill-status ${action.enabled ? "success" : "warning"}">${action.enabled ? "已启用" : "未启用"}</span>
+            <span class="skill-status ${action.available ? "success" : "error"}">${action.available ? "可用" : "不可用"}</span>
+            <span class="skill-status">${escapeHtml(action.status || "unknown")}</span>
+          </div>
+          <div class="skill-action-toolbar">
+            ${renderActionToggleButton(action.skill_name || "", action)}
+          </div>
+          ${action.available ? "" : `<div class="skill-action-unavailable">不可用原因：${escapeHtml(action.unavailable_reason || "未提供")}</div>`}
+        </div>
+      `,
+    )
+    .join("");
+}
+
+function renderSkillCard(skill) {
+  const actions = Array.isArray(skill.actions) ? skill.actions : [];
+  const expanded = state.expandedSkillNames.has(skill.name);
+  const actionsWithSkillName = actions.map((action) => ({ ...action, skill_name: skill.name }));
+  const sourceText = skill.source === "uploaded" ? "uploaded" : "builtin";
+  return `
+    <article class="skill-card" data-skill-name="${escapeHtml(skill.name || "")}">
+      <div class="skill-card-header">
+        <div class="skill-card-title">
+          <span class="skill-icon">${getSkillIcon(skill.category, skill.source)}</span>
+          <div class="skill-title-block">
+            <h3>${escapeHtml(skill.display_name || skill.name || "未命名 Skill")}</h3>
+            <p class="skill-technical-name">${escapeHtml(skill.name || "")}</p>
+          </div>
+        </div>
+        ${renderSkillToggleButton(skill)}
+      </div>
+      <p class="skill-description">${escapeHtml(skill.description || "暂无描述")}</p>
+      <div class="skill-tags">
+        <span class="skill-tag">${escapeHtml(skill.category || "未分类")}</span>
+        <span class="skill-tag">source: ${escapeHtml(sourceText)}</span>
+        <span class="skill-tag">${skill.requires_file ? "需要文件" : "无需文件"}</span>
+        ${(skill.supported_file_types || []).length
+          ? skill.supported_file_types.map((item) => `<span class="skill-tag">${escapeHtml(item)}</span>`).join("")
+          : '<span class="skill-tag">通用</span>'}
+        <span class="skill-tag">${escapeHtml(skill.version || "v1")}</span>
+      </div>
+      <div class="skill-statuses">
+        <span class="skill-status ${skill.enabled ? "success" : "warning"}">${skill.enabled ? "已启用" : "未启用"}</span>
+        <span class="skill-status ${skill.available ? "success" : "error"}">${skill.available ? "可用" : "待加载"}</span>
+        <span class="skill-status">包含 ${actions.length} 个子能力</span>
+      </div>
+      ${
+        skill.uploaded_at
+          ? `<div class="skill-upload-meta">上传时间：${escapeHtml(skill.uploaded_at)}${skill.upload_status ? ` · 状态：${escapeHtml(skill.upload_status)}` : ""}</div>`
+          : ""
+      }
+      ${skill.available ? "" : `<div class="skill-unavailable">不可用原因：${escapeHtml(skill.unavailable_reason || "未提供")}</div>`}
+      <p class="skill-usage">${escapeHtml(skill.usage || "暂无使用说明")}</p>
+      <button type="button" class="skill-actions-toggle" data-toggle-skill="${escapeHtml(skill.name || "")}">
+        ${expanded ? "收起子能力" : "查看子能力"}
+      </button>
+      ${expanded ? `<div class="skill-actions">${renderSkillActions(actionsWithSkillName)}</div>` : ""}
+    </article>
+  `;
+}
+
+function renderSkillsPanel(payload) {
+  const stats = $("skillsPanelStats");
+  const body = $("skillsPanelBody");
+  if (!stats || !body) {
     return;
   }
 
-  $("figureGrid").innerHTML = entries
-    .map((entry, index) => {
-      const url = toAssetUrl(entry.url);
+  if (!payload || !Array.isArray(payload.skills)) {
+    stats.innerHTML = "";
+    body.innerHTML = `<div class="skills-empty">Skill 列表加载失败，请检查后端 /api/agent/skills 接口。</div>`;
+    return;
+  }
+
+  stats.innerHTML = `
+    <div class="skills-panel-stat"><span>已安装</span><strong>${Number(payload.total || 0)}</strong></div>
+    <div class="skills-panel-stat"><span>已启用</span><strong>${Number(payload.enabled_count || 0)}</strong></div>
+    <div class="skills-panel-stat"><span>可用</span><strong>${Number(payload.available_count || 0)}</strong></div>
+  `;
+
+  const contentHtml = payload.skills.length
+    ? payload.skills.map((skill) => renderSkillCard(skill)).join("")
+    : `<div class="skills-empty">当前没有可展示的大 Skill。</div>`;
+  body.innerHTML = payload.error
+    ? `<div class="skills-empty">${escapeHtml(payload.error)}</div>${contentHtml}`
+    : contentHtml;
+
+  body.querySelectorAll("[data-toggle-skill]").forEach((button) => {
+    button.addEventListener("click", () => toggleSkillActions(button.dataset.toggleSkill || ""));
+  });
+  body.querySelectorAll("[data-toggle-skill-enabled]").forEach((button) => {
+    button.addEventListener("click", () => {
+      toggleSkillEnabled(button.dataset.toggleSkillEnabled || "", button.dataset.nextEnabled === "true");
+    });
+  });
+  body.querySelectorAll("[data-toggle-action-enabled]").forEach((button) => {
+    button.addEventListener("click", () => {
+      toggleActionEnabled(
+        button.dataset.toggleActionEnabled || "",
+        button.dataset.actionName || "",
+        button.dataset.nextEnabled === "true",
+      );
+    });
+  });
+}
+
+function openSkillsPanel() {
+  const panel = $("skillsPanel");
+  if (!panel) {
+    return;
+  }
+  panel.classList.remove("hidden");
+  panel.setAttribute("aria-hidden", "false");
+}
+
+function closeSkillsPanel() {
+  const panel = $("skillsPanel");
+  if (!panel) {
+    return;
+  }
+  panel.classList.add("hidden");
+  panel.setAttribute("aria-hidden", "true");
+}
+
+function openModelList() {
+  const popover = $("modelListPopover");
+  if (!popover) {
+    return;
+  }
+  state.modelListOpen = true;
+  popover.classList.remove("hidden");
+  popover.setAttribute("aria-hidden", "false");
+}
+
+function closeModelList() {
+  const popover = $("modelListPopover");
+  if (!popover) {
+    return;
+  }
+  state.modelListOpen = false;
+  popover.classList.add("hidden");
+  popover.setAttribute("aria-hidden", "true");
+}
+
+function toggleSkillActions(skillName) {
+  if (!skillName) {
+    return;
+  }
+  if (state.expandedSkillNames.has(skillName)) {
+    state.expandedSkillNames.delete(skillName);
+  } else {
+    state.expandedSkillNames.add(skillName);
+  }
+  renderSkillsPanel(state.skillsPayload);
+}
+
+async function refreshSkillsPanel() {
+  await loadSkillsSafely();
+}
+
+async function toggleSkillEnabled(skillName, enabled) {
+  try {
+    const response = await requestSetSkillEnabled(skillName, enabled);
+    if (!response.success) {
+      throw new Error(response.error_message || "切换 Skill 状态失败");
+    }
+    await refreshSkillsPanel();
+  } catch (error) {
+    console.error("切换 Skill 状态失败：", error);
+    window.alert(`切换 Skill 状态失败：${error.message || "未知错误"}`);
+  }
+}
+
+async function toggleActionEnabled(skillName, actionName, enabled) {
+  try {
+    const response = await requestSetActionEnabled(skillName, actionName, enabled);
+    if (!response.success) {
+      throw new Error(response.error_message || "切换子能力状态失败");
+    }
+    state.expandedSkillNames.add(skillName);
+    await refreshSkillsPanel();
+  } catch (error) {
+    console.error("切换子能力状态失败：", error);
+    window.alert(`切换子能力状态失败：${error.message || "未知错误"}`);
+  }
+}
+
+function renderSelectedFileChip(file) {
+  const chip = $("selectedFileChip");
+  if (!chip) {
+    console.warn("找不到 selectedFileChip，跳过文件 chip 渲染");
+    return;
+  }
+
+  if (!file) {
+    chip.classList.add("hidden");
+    chip.innerHTML = "";
+    return;
+  }
+
+  chip.classList.remove("hidden");
+  chip.innerHTML = `
+    <span class="file-chip-name">已选择：${escapeHtml(file.name)}</span>
+    <button id="removeSelectedFileButton" type="button" class="file-chip-remove" aria-label="移除已选文件">×</button>
+  `;
+
+  const removeBtn = $("removeSelectedFileButton");
+  if (removeBtn) {
+    removeBtn.addEventListener("click", () => {
+      state.selectedFile = null;
+      const fileInput = $("fileInput");
+      if (fileInput) {
+        fileInput.value = "";
+      }
+      renderSelectedFileChip(null);
+    });
+  }
+}
+
+function handleFileSelect(event) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) {
+    return;
+  }
+
+  const lowerName = file.name.toLowerCase();
+  if (!lowerName.endsWith(".csv")) {
+    window.alert("请上传 CSV 格式的光谱文件");
+    event.target.value = "";
+    state.selectedFile = null;
+    renderSelectedFileChip(null);
+    return;
+  }
+
+  state.selectedFile = file;
+  console.log("已选择文件：", file.name);
+  renderSelectedFileChip(file);
+}
+
+async function handleSkillZipSelect(event) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) {
+    return;
+  }
+  const lowerName = file.name.toLowerCase();
+  if (!lowerName.endsWith(".zip")) {
+    window.alert("请上传 zip 格式的 Skill 压缩包");
+    event.target.value = "";
+    return;
+  }
+  await uploadSkillZip(file);
+  event.target.value = "";
+}
+
+async function uploadSkillZip(file) {
+  if (state.uploadingSkill) {
+    return;
+  }
+  state.uploadingSkill = true;
+  const uploadBtn = $("uploadSkillBtn");
+  const originalText = uploadBtn?.textContent || "上传 Skill";
+  if (uploadBtn) {
+    uploadBtn.disabled = true;
+    uploadBtn.textContent = "上传中...";
+  }
+  try {
+    const response = await requestUploadSkillZip(file);
+    if (!response.success) {
+      throw new Error(response.error_message || "Skill 上传失败");
+    }
+    console.log("Skill 上传成功：", response);
+    window.alert(`${response.message || "Skill 上传成功"}${response.reload_required ? "，请刷新 Skills 列表查看待加载状态。" : ""}`);
+    await loadSkillsSafely();
+  } catch (error) {
+    console.error("Skill 上传失败：", error);
+    window.alert(`Skill 上传失败：${error.message || "未知错误"}`);
+  } finally {
+    state.uploadingSkill = false;
+    if (uploadBtn) {
+      uploadBtn.disabled = false;
+      uploadBtn.textContent = originalText;
+    }
+  }
+}
+
+function renderDetailRows(title, details) {
+  return Object.entries(details || {})
+    .filter(([, value]) => value !== null && value !== undefined && value !== "")
+    .map(
+      ([key, value]) => `
+        <div class="detail-item">
+          <span>${escapeHtml(title ? `${title} · ${key}` : key)}</span>
+          <strong>${escapeHtml(typeof value === "object" ? JSON.stringify(value, null, 2) : String(value))}</strong>
+        </div>
+      `,
+    )
+    .join("");
+}
+
+function renderPlots(plots) {
+  const items = (plots || [])
+    .map((url, index) => {
+      const normalizedUrl = typeof url === "string" ? url : url?.url;
+      const title = typeof url === "string" ? `图谱 ${index + 1}` : url?.title || `图谱 ${index + 1}`;
+      const assetUrl = toAssetUrl(normalizedUrl);
+      if (!assetUrl) {
+        return "";
+      }
       return `
-        <figure class="figure-card">
-          <button type="button" data-figure-url="${escapeHtml(url)}" data-figure-title="${escapeHtml(entry.label || `图谱 ${index + 1}`)}">
-            ${url ? `<img src="${escapeHtml(url)}" alt="${escapeHtml(entry.label || `图谱 ${index + 1}`)}" />` : `<div class="empty-figure">暂无图像</div>`}
-          </button>
-          <figcaption>
-            <span>${escapeHtml(entry.label || `图谱 ${index + 1}`)}</span>
-            ${url ? `<a class="figure-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">新窗口</a>` : ""}
-          </figcaption>
+        <figure class="figure-tile">
+          <img src="${escapeHtml(assetUrl)}" alt="plot-${index + 1}" />
+          <figcaption>${escapeHtml(title)}</figcaption>
         </figure>
+      `;
+    })
+    .filter(Boolean);
+  return items.length ? `<div class="analysis-figures">${items.join("")}</div>` : "";
+}
+
+function renderListSection(title, items = [], emptyText = "当前未提供。") {
+  const list = Array.isArray(items) ? items.filter(Boolean) : [];
+  return `
+    <section class="explanation-card">
+      <h4>${escapeHtml(title)}</h4>
+      ${
+        list.length
+          ? `<ul class="analysis-list compact">${list.map((item) => `<li>${escapeHtml(String(item))}</li>`).join("")}</ul>`
+          : `<div class="analysis-empty">${escapeHtml(emptyText)}</div>`
+      }
+    </section>
+  `;
+}
+
+function renderEvidenceSection(structured = {}) {
+  const evidence = structured?.confidence_analysis?.evidence_items || [];
+  return `
+    <section class="explanation-card">
+      <h4>关键判断依据</h4>
+      ${
+        evidence.length
+          ? `<div class="detail-list">${evidence
+              .map(
+                (item) => `
+                  <div class="detail-item">
+                    <span>${escapeHtml(item.label || "指标")}</span>
+                    <strong>${escapeHtml(item.value || "未提供")}</strong>
+                  </div>
+                `,
+              )
+              .join("")}</div>`
+          : `<div class="analysis-empty">当前未提供关键判断依据。</div>`
+      }
+    </section>
+  `;
+}
+
+function renderSpectralFeaturesSection(structured = {}) {
+  const features = structured?.spectral_features || [];
+  return `
+    <section class="explanation-card">
+      <h4>光谱特征说明</h4>
+      ${
+        features.length
+          ? `<div class="feature-list">${features
+              .map(
+                (item) => `
+                  <div class="feature-item">
+                    <strong>${escapeHtml(item.wavenumber !== undefined && item.wavenumber !== null ? `${Number(item.wavenumber).toFixed(1)} cm^-1` : "未提供峰位")}</strong>
+                    <span>${escapeHtml(item.label || "未标注")}</span>
+                  </div>
+                `,
+              )
+              .join("")}</div>`
+          : `<div class="analysis-empty">当前未提供明确峰位说明。</div>`
+      }
+    </section>
+  `;
+}
+
+function renderMetricGrid(metrics = {}) {
+  const entries = Object.entries(metrics).filter(([, value]) => value !== null && value !== undefined && value !== "");
+  if (!entries.length) {
+    return "";
+  }
+  return `
+    <div class="detail-list">
+      ${entries
+        .map(
+          ([key, value]) => `
+            <div class="detail-item">
+              <span>${escapeHtml(key)}</span>
+              <strong>${escapeHtml(String(value))}</strong>
+            </div>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderPreprocessingResult(message) {
+  const analysis = message?.analysis || {};
+  const steps = Array.isArray(analysis.steps) ? analysis.steps : [];
+  const warnings = Array.isArray(analysis.warnings) ? analysis.warnings : [];
+  const plots = Array.isArray(analysis.plots) ? analysis.plots : [];
+  const rawPlot = plots.find((item) => item?.kind === "raw");
+  const processedPlot = plots.find((item) => item?.kind === "processed");
+  const overlayPlot = plots.find((item) => item?.kind === "overlay");
+  return `
+    <div class="analysis-card">
+      <div class="analysis-summary">
+        <p><strong>光谱预处理完成</strong></p>
+        <p>${escapeHtml(message?.content || analysis.summary || "预处理完成。")}</p>
+      </div>
+      ${
+        steps.length
+          ? `
+            <div class="analysis-summary">
+              <p><strong>处理步骤</strong></p>
+              <ul class="analysis-list">
+                ${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}
+              </ul>
+            </div>
+          `
+          : ""
+      }
+      <div class="preprocess-grid">
+        <section class="figure-panel">
+          <h4>处理前</h4>
+          ${
+            rawPlot?.url
+              ? `<figure class="figure-tile"><img src="${escapeHtml(toAssetUrl(rawPlot.url))}" alt="raw-spectrum" /><figcaption>${escapeHtml(rawPlot.description || rawPlot.title || "原始光谱图")}</figcaption></figure>`
+              : `<div class="analysis-empty">当前没有可展示的原始光谱图。</div>`
+          }
+        </section>
+        <section class="figure-panel">
+          <h4>处理后</h4>
+          ${
+            processedPlot?.url
+              ? `<figure class="figure-tile"><img src="${escapeHtml(toAssetUrl(processedPlot.url))}" alt="processed-spectrum" /><figcaption>${escapeHtml(processedPlot.description || processedPlot.title || "预处理后光谱图")}</figcaption></figure>`
+              : `<div class="analysis-empty">当前没有可展示的预处理后光谱图。</div>`
+          }
+        </section>
+      </div>
+      <section class="figure-panel overlay">
+        <h4>前后叠加对比</h4>
+        ${
+          overlayPlot?.url
+            ? `<figure class="figure-tile"><img src="${escapeHtml(toAssetUrl(overlayPlot.url))}" alt="overlay-spectrum" /><figcaption>${escapeHtml(overlayPlot.description || overlayPlot.title || "预处理前后叠加对比图")}</figcaption></figure>`
+            : `<div class="analysis-empty">当前没有可展示的叠加对比图。</div>`
+        }
+      </section>
+      ${
+        analysis.output_file
+          ? `
+            <div class="detail-item">
+              <span>输出文件</span>
+              <strong>${escapeHtml(analysis.output_file)}</strong>
+            </div>
+          `
+          : ""
+      }
+      ${renderMetricGrid(analysis.metrics || {})}
+      ${renderPlots(analysis.plots || [])}
+      ${warnings.length ? `<div class="analysis-summary"><p><strong>提示：</strong>${escapeHtml(warnings.join("；"))}</p></div>` : ""}
+    </div>
+  `;
+}
+
+function renderPredictionResult(message) {
+  const analysis = message?.analysis || {};
+  const details = analysis.details || {};
+  const confidence = details.confidence || {};
+  const disagreement = details.model_disagreement || {};
+  const structured = details.structured_explanation || {};
+  const cards = [];
+  if (analysis.predicted_value !== null && analysis.predicted_value !== undefined && analysis.predicted_value !== "") {
+    cards.push(`
+      <div class="analysis-block">
+        <span>预测浓度</span>
+        <strong>${escapeHtml(String(analysis.predicted_value))} ${escapeHtml(analysis.unit || "")}</strong>
+      </div>
+    `);
+  }
+  if (analysis.model_name || analysis.model_version) {
+    cards.push(`
+      <div class="analysis-block">
+        <span>模型名称</span>
+        <strong>${escapeHtml(analysis.model_name || analysis.model_version)}</strong>
+      </div>
+    `);
+  }
+  if (confidence.status) {
+    cards.push(`
+      <div class="analysis-block">
+        <span>置信度</span>
+        <strong>${escapeHtml(confidence.status)}</strong>
+      </div>
+    `);
+  }
+  if (disagreement.message) {
+    cards.push(`
+      <div class="analysis-block">
+        <span>模型一致性</span>
+        <strong>${escapeHtml(disagreement.message)}</strong>
+      </div>
+    `);
+  }
+  if (details.sample_file) {
+    cards.push(`
+      <div class="analysis-block">
+        <span>样品文件</span>
+        <strong>${escapeHtml(details.sample_file)}</strong>
+      </div>
+    `);
+  }
+  return `
+    <div class="analysis-card">
+      ${cards.length ? `<div class="analysis-hero">${cards.join("")}</div>` : ""}
+      <div class="explanation-grid">
+        ${renderListSection("结果摘要", structured.summary || [message?.content || analysis.summary || "预测完成。"], "当前未提供结果摘要。")}
+        <section class="explanation-card">
+          <h4>模型对比</h4>
+          <div class="detail-list">
+            ${structured?.model_comparison?.svr_prediction !== undefined ? `<div class="detail-item"><span>SVR</span><strong>${escapeHtml(String(structured.model_comparison.svr_prediction))}</strong></div>` : ""}
+            ${structured?.model_comparison?.rf_prediction !== undefined ? `<div class="detail-item"><span>RF</span><strong>${escapeHtml(String(structured.model_comparison.rf_prediction))}</strong></div>` : ""}
+            ${structured?.model_comparison?.absolute_difference !== undefined ? `<div class="detail-item"><span>绝对差异</span><strong>${escapeHtml(String(structured.model_comparison.absolute_difference))}</strong></div>` : ""}
+            ${structured?.model_comparison?.relative_difference !== undefined ? `<div class="detail-item"><span>相对差异</span><strong>${escapeHtml(String(structured.model_comparison.relative_difference))}</strong></div>` : ""}
+          </div>
+        </section>
+        ${renderEvidenceSection(structured)}
+        ${renderSpectralFeaturesSection(structured)}
+        ${renderListSection("风险提示", structured.risks || [], "当前未提供明显风险提示。")}
+        ${renderListSection("建议", structured.suggestions || [], "当前未提供额外建议。")}
+      </div>
+      <div class="analysis-summary soft">
+        <p><strong>补充说明</strong></p>
+        <p>${escapeHtml(structured.explanation_text || message?.content || analysis.summary || "预测完成。")}</p>
+      </div>
+      ${renderPlots(analysis.plots || [])}
+    </div>
+  `;
+}
+
+function renderUploadedSkillResult(message) {
+  const analysis = message?.analysis || {};
+  const details = analysis.details || {};
+  const replyText = details.reply_text || message?.content || analysis.summary || "上传 Skill 已执行。";
+  return `
+    <div class="analysis-card">
+      <div class="analysis-summary">
+        <p><strong>上传 Skill 执行结果</strong></p>
+      </div>
+      <pre class="skill-result-block">${escapeHtml(replyText)}</pre>
+    </div>
+  `;
+}
+
+function renderModelStatusResult(message) {
+  const analysis = message?.analysis || {};
+  const details = analysis.details || {};
+  return `
+    <div class="analysis-card">
+      <div class="analysis-summary">
+        <p><strong>模型状态检查</strong></p>
+        <p>${escapeHtml(message?.content || analysis.summary || "模型状态已更新。")}</p>
+      </div>
+      <div class="detail-list">
+        ${(analysis.model_name || analysis.model_version) ? `<div class="detail-item"><span>当前模型</span><strong>${escapeHtml(analysis.model_name || analysis.model_version)}</strong></div>` : ""}
+        ${analysis.model_file_status ? `<div class="detail-item"><span>模型文件状态</span><strong>${escapeHtml(analysis.model_file_status)}</strong></div>` : ""}
+        ${analysis.health_status ? `<div class="detail-item"><span>健康状态</span><strong>${escapeHtml(analysis.health_status)}</strong></div>` : ""}
+        ${details.loadable !== null && details.loadable !== undefined ? `<div class="detail-item"><span>可加载性</span><strong>${details.loadable ? "可加载" : "加载失败"}</strong></div>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+function renderReportResult(message) {
+  const analysis = message?.analysis || {};
+  return `
+    <div class="analysis-card">
+      <div class="analysis-summary">
+        <p><strong>实验报告生成结果</strong></p>
+        <p>${escapeHtml(message?.content || analysis.summary || "报告已生成。")}</p>
+      </div>
+      <div class="detail-list">
+        ${analysis.report_path ? `<div class="detail-item"><span>报告路径</span><strong>${escapeHtml(analysis.report_path)}</strong></div>` : ""}
+        ${analysis.export_status ? `<div class="detail-item"><span>导出状态</span><strong>${escapeHtml(analysis.export_status)}</strong></div>` : ""}
+        ${analysis.report_preview ? `<div class="detail-item"><span>摘要</span><strong>${escapeHtml(analysis.report_preview)}</strong></div>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+function renderGenericAnalysisResult(message) {
+  const analysis = message?.analysis || {};
+  return `
+    <div class="analysis-card">
+      <div class="analysis-summary">
+        <p>${escapeHtml(message?.content || analysis.summary || "处理完成。")}</p>
+      </div>
+      ${renderDetailRows("", analysis.details || {})}
+    </div>
+  `;
+}
+
+function renderAssistantResponse(payload) {
+  const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+  messages.forEach((message) => {
+    if (message.type === "analysis") {
+      const kind = message.result_kind || message.analysis?.result_kind || "generic";
+      if (kind === "preprocessing") {
+        appendMessage("assistant", renderPreprocessingResult(message), "analysis");
+        return;
+      }
+      if (kind === "prediction") {
+        appendMessage("assistant", renderPredictionResult(message), "analysis");
+        return;
+      }
+      if (kind === "model_status") {
+        appendMessage("assistant", renderModelStatusResult(message), "analysis");
+        return;
+      }
+      if (kind === "report") {
+        appendMessage("assistant", renderReportResult(message), "analysis");
+        return;
+      }
+      if (kind === "uploaded_skill") {
+        appendMessage("assistant", renderUploadedSkillResult(message), "analysis");
+        return;
+      }
+      appendMessage("assistant", renderGenericAnalysisResult(message), "analysis");
+      return;
+    }
+    if (message.type === "error") {
+      appendMessage("assistant", `<p class="error-message">${escapeHtml(message.content || "分析失败。")}</p>`, "error");
+      return;
+    }
+    appendMessage("assistant", `<p>${escapeHtml(message.content || "")}</p>`, "text");
+  });
+}
+
+function renderModelList(models = [], currentModel = "") {
+  const body = $("modelListBody");
+  if (!body) {
+    return;
+  }
+  if (!models.length) {
+    body.innerHTML = `<div class="model-list-empty">当前没有可展示的模型。</div>`;
+    return;
+  }
+  body.innerHTML = models
+    .map((model) => {
+      const selected = model.name === currentModel;
+      return `
+        <button
+          type="button"
+          class="model-list-item ${selected ? "selected" : ""}"
+          data-model-name="${escapeHtml(model.name || "")}"
+          ${model.available ? "" : "disabled"}
+        >
+          <div class="model-list-main">
+            <div class="model-list-title">
+              <strong>${escapeHtml(model.display_name || model.name || "未命名模型")}</strong>
+              <span class="model-list-check">${selected ? "√" : ""}</span>
+            </div>
+            <div class="model-list-meta">
+              ${selected ? '<span class="model-badge">已选中</span>' : ""}
+              <span class="model-badge ${model.available ? "ok" : "warn"}">${model.available ? "可用" : "不可用"}</span>
+            </div>
+            <p>${escapeHtml(model.description || "暂无描述")}</p>
+          </div>
+        </button>
       `;
     })
     .join("");
 
-  $("figureGrid").querySelectorAll("button[data-figure-url]").forEach((button) => {
-    button.addEventListener("click", () => {
-      openFigureModal(button.dataset.figureUrl, button.dataset.figureTitle);
+  body.querySelectorAll("[data-model-name]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await switchModel(button.dataset.modelName || "");
     });
   });
 }
 
-function renderAnalysisPayload(payload) {
-  state.latestAnalysis = payload;
-  persistSessionId(payload.session_id || state.sessionId);
-  renderAnalysisSnapshot(payload);
-  renderPrediction(payload.result || {});
-  renderProfessionalAnalysis(payload.professional_analysis || {});
-  renderModelInfo(payload.model_info || state.currentModel || {});
-  renderExperimentInfo(payload.experiment_metadata || {});
-  renderFiguresAndReport(payload);
-  $("llmExplanation").innerHTML = renderMarkdown(payload.llm_explanation || "未生成解释。");
-  setBadge($("historyTaskBadge"), payload.history?.task_id ? `task ${payload.history.task_id.slice(0, 8)}` : "分析完成", "success");
-}
-
-function buildMetadata() {
-  return {
-    message: "请分析这个 Raman CSV 文件",
-    sample_name: $("sampleName").value.trim(),
-    sample_type: $("sampleType").value.trim(),
-    operator: $("operatorName").value.trim(),
-    instrument: $("instrument").value.trim(),
-    laser_power: $("laserPower").value.trim(),
-    integration_time: $("integrationTime").value.trim(),
-    remarks: $("remarks").value.trim(),
-  };
-}
-
-async function sendChat(message) {
-  const text = (message || $("chatInput").value).trim();
-  if (!text || state.chatBusy) {
+async function switchModel(modelName) {
+  if (!modelName) {
     return;
   }
-  $("chatInput").value = "";
-  appendChatMessage("user", "你", `<p>${escapeHtml(text)}</p>`, `session ${state.sessionId || "new"}`);
-  setChatBusy(true, "正在思考...");
-  const loadingBubble = appendChatMessage("agent", "Agent", `<p class="muted">正在思考，请稍等...</p>`, "加载中");
-
-  const debug = $("chatDebug").checked;
-  const response = await chatWithAgent(text, debug, state.sessionId || null);
-  setChatBusy(false);
-
-  if (!response.success) {
-    const friendly = normalizeErrorMessage(response.error_message, text);
-    replaceChatMessage(
-      loadingBubble,
-      "agent",
-      "Agent",
-      `<p>${escapeHtml(friendly)}</p>`,
-      "错误",
-      response.error_message ? `<p class="muted">${escapeHtml(response.error_message)}</p>` : ""
-    );
-    return;
-  }
-
-  persistSessionId(response.session_id || state.sessionId);
-  const debugHtml = debug
-    ? `${response.tool_result ? renderJsonDetails("tool_result", response.tool_result) : ""}${response.available_tools ? renderJsonDetails("available_tools", response.available_tools) : ""}${response.raw_intent ? renderJsonDetails("raw_intent", response.raw_intent) : ""}${response.llm_raw_response ? renderJsonDetails("llm_raw_response", response.llm_raw_response) : ""}`
-    : "";
-  replaceChatMessage(
-    loadingBubble,
-    "agent",
-    "Agent",
-    renderChatPayload({ ...response, _debug_html: debugHtml }),
-  );
-}
-
-function setUploadStatus(stage, text) {
-  setBadge($("analysisStatus"), stage, stage === "失败" ? "error" : stage === "分析完成" ? "success" : "warning");
-  setAnalysisProgress(text);
-}
-
-async function submitAnalysis() {
-  const file = $("csvFile").files[0];
-  setError("");
-  if (!file) {
-    setError("请先选择 CSV 文件。");
-    return;
-  }
-  if (!file.name.toLowerCase().endsWith(".csv")) {
-    setError("当前只支持 CSV 文件。");
-    return;
-  }
-
-  setAnalysisBusy(true, "正在上传文件...");
-  setUploadStatus("上传中", "正在上传 CSV 文件...");
-  const loadingTimer = setTimeout(() => {
-    if (state.analysisBusy) {
-      setUploadStatus("分析中", "文件已上传，正在进行光谱分析和报告生成...");
+  try {
+    console.log("开始切换模型：", modelName);
+    const response = await switchAgentModel(modelName);
+    if (!response.success) {
+      throw new Error(response.error_message || "切换模型失败");
     }
-  }, 700);
+    state.currentModel = { ...(state.currentModel || {}), model_version: response.current_model };
+    $("topModelVersion").textContent = response.current_model || "未知";
+    await Promise.allSettled([loadModelsSafely(), loadStatusSafely()]);
+    renderModelList(state.modelsPayload.models || [], response.current_model || "");
+    console.log("模型切换完成：", response);
+  } catch (error) {
+    console.error("切换模型失败：", error);
+    window.alert(`切换模型失败：${error.message || "未知错误"}`);
+  }
+}
 
-  const response = await analyzeFile(file, buildMetadata(), state.sessionId || null);
-  clearTimeout(loadingTimer);
-  setAnalysisBusy(false);
+function bindComposerEvents() {
+  const fileButton = $("fileButton");
+  const fileInput = $("fileInput");
+  const sendButton = $("sendButton");
+  const messageInput = $("messageInput");
 
-  if (!response.success) {
-    setUploadStatus("失败", "");
-    const friendly = normalizeErrorMessage(response.error_message, file.name);
-    setError(friendly);
-    appendChatMessage("agent", "Agent", `<p>${escapeHtml(friendly)}</p>`, "分析失败");
+  if (!fileButton) {
+    console.error("找不到 fileButton，无法绑定上传按钮事件");
+    return;
+  }
+  if (!fileInput) {
+    console.error("找不到 fileInput，无法打开文件选择窗口");
     return;
   }
 
-  persistSessionId(response.session_id || state.sessionId);
-  setUploadStatus("分析完成", "分析已完成，下面是结果概览。");
-  renderAnalysisPayload(response);
-  setError("");
-  await refreshHistory();
-}
-
-function historyFilters() {
-  return {
-    limit: 10,
-    keyword: $("historyKeyword").value.trim(),
-    model_version: $("historyModelVersion").value.trim(),
-    min_prediction: $("historyMinPrediction").value,
-    max_prediction: $("historyMaxPrediction").value,
-    quality_level: $("historyQualityLevel").value.trim(),
-    baseline_level: $("historyBaselineLevel").value.trim(),
-  };
-}
-
-function renderHistoryItems(items) {
-  if (!Array.isArray(items) || items.length === 0) {
-    $("historyList").innerHTML = `<div class="history-empty">暂无历史记录。</div>`;
-    return;
-  }
-
-  $("historyList").innerHTML = items
-    .map(
-      (item) => `
-        <button class="history-row" data-task-id="${escapeHtml(item.task_id)}" type="button">
-          <span><strong>${escapeHtml(item.sample_file || item.sample_name || "未命名样品")}</strong><em>${escapeHtml((item.task_id || "").slice(0, 8))}</em></span>
-          <span>${escapeHtml(formatNumber(item.fusion_prediction))} ${escapeHtml(item.unit || "")}</span>
-          <span><span class="tag">${escapeHtml(item.model_version || "未知模型")}</span></span>
-          <span><span class="tag">${escapeHtml(item.quality_level || "未评估")}</span></span>
-          <span><span class="tag">${escapeHtml(item.baseline_level || "未评估")}</span></span>
-          <span>${escapeHtml(item.created_at || "")}</span>
-        </button>
-      `
-    )
-    .join("");
-
-  $("historyList").querySelectorAll(".history-row").forEach((row) => {
-    row.addEventListener("click", () => loadHistoryDetail(row.dataset.taskId));
+  fileButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    console.log("点击了 + 上传按钮");
+    fileInput.click();
   });
-}
 
-async function refreshHistory() {
-  setHistoryStatus("加载中...");
-  const response = await listHistory(historyFilters());
-  if (!response.success) {
-    $("historyList").innerHTML = `<div class="history-empty">${escapeHtml(normalizeErrorMessage(response.error_message, "历史记录加载失败"))}</div>`;
-    setHistoryStatus("加载失败");
-    return;
+  fileInput.addEventListener("change", handleFileSelect);
+
+  if (sendButton) {
+    sendButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      sendChatMessage();
+    });
   }
-  renderHistoryItems(response.items || []);
-  setHistoryStatus(`已加载 ${response.items?.length || 0} 条`);
-}
 
-function renderHistoryDetailCard(label, value) {
-  return `<div class="history-detail-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value ?? "未提供")}</strong></div>`;
-}
-
-function historyDetailHtml(item) {
-  const result = item.result || {};
-  const confidence = result.confidence || {};
-  const report = item.report || {};
-  const webUrls = item.web_urls || {};
-  const figureUrls = webUrls.figures || {};
-
-  const figureLinks = Object.entries(figureUrls || {})
-    .map(([key, value]) => {
-      const url = toAssetUrl(value);
-      return url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(key)}</a>` : "";
-    })
-    .filter(Boolean)
-    .join("");
-
-  return `
-    <div class="history-detail-grid">
-      ${renderHistoryDetailCard("文件名", item.sample_file || result.sample_file)}
-      ${renderHistoryDetailCard("时间", item.created_at)}
-      ${renderHistoryDetailCard("预测值", `${formatNumber(item.fusion_prediction ?? result.fusion_prediction)} ${item.unit || result.unit || ""}`.trim())}
-      ${renderHistoryDetailCard("可信度", item.confidence_status || confidence.status)}
-      ${renderHistoryDetailCard("模型版本", item.model_version)}
-      ${renderHistoryDetailCard("质量/基线", `${item.quality_level || "未评估"} / ${item.baseline_level || "未评估"}`)}
-    </div>
-    <div class="link-row">
-      ${report.report_file ? `<a href="${escapeHtml(toAssetUrl(`/static/reports/${report.report_file}`))}" target="_blank" rel="noopener noreferrer">查看报告</a>` : ""}
-      ${figureLinks}
-    </div>
-    <details>
-      <summary>查看完整详情 JSON</summary>
-      <pre>${escapeHtml(JSON.stringify(item, null, 2))}</pre>
-    </details>
-  `;
-}
-
-async function loadHistoryDetail(taskId) {
-  if (!taskId) {
-    return;
+  if (messageInput) {
+    messageInput.addEventListener("input", autoResizeTextarea);
+    messageInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        sendChatMessage();
+      }
+    });
   }
-  setHistoryStatus(`正在查看 ${taskId.slice(0, 8)}...`);
-  const response = await getHistoryDetail(taskId);
-  if (!response.success) {
-    $("historyDetail").classList.remove("hidden");
-    $("historyDetail").innerHTML = `<p class="error-text">${escapeHtml(normalizeErrorMessage(response.error_message, "历史详情加载失败"))}</p>`;
-    setHistoryStatus("查看失败");
-    return;
-  }
-  const item = response.item || response.data || {};
-  $("historyDetail").classList.remove("hidden");
-  $("historyDetail").innerHTML = `
-    <h3>${escapeHtml(item.sample_file || "历史详情")}</h3>
-    <p class="muted">task_id: ${escapeHtml(item.task_id || taskId)}</p>
-    <div class="panel-actions">
-      <button id="renderHistoryBtn" class="secondary-action" type="button">渲染到结果区</button>
-      ${item.report_file ? `<a href="${escapeHtml(toAssetUrl(`/static/reports/${item.report_file}`))}" target="_blank" rel="noopener noreferrer">查看报告</a>` : ""}
-    </div>
-    ${historyDetailHtml(item)}
-  `;
-  const renderButton = $("renderHistoryBtn");
-  if (renderButton) {
-    renderButton.addEventListener("click", () => renderAnalysisPayload(normalizeHistoryDetail(item)));
-  }
-  setHistoryStatus("已加载详情");
 }
 
-function normalizeHistoryDetail(item) {
-  return {
-    session_id: state.sessionId,
-    result: item.result || {
-      sample_file: item.sample_file,
-      final_prediction: item.fusion_prediction,
-      fusion_prediction: item.fusion_prediction,
-      svr_prediction: item.svr_prediction,
-      rf_prediction: item.rf_prediction,
-      unit: item.unit,
-      confidence: { status: item.confidence_status, knn_distance: item.knn_distance, threshold: item.confidence_threshold },
-      model_disagreement: {
-        absolute_difference: item.model_abs_diff,
-        relative_difference: item.model_rel_diff,
-        warning: Boolean(item.model_warning),
-        message: item.model_message,
-      },
-      pipeline: item.pipeline_text ? item.pipeline_text.split(" → ") : [],
-    },
-    professional_analysis: item.professional_analysis || {},
-    model_info: item.model_info || {},
-    experiment_metadata: item.experiment_metadata || {},
-    llm_explanation: item.llm_explanation,
-    report: item.report || { report_file: item.report_file, report_path: item.report_path },
-    web_urls: item.web_urls || {
-      figures: {
-        raw: item.raw_figure_url,
-        preprocessed: item.preprocessed_figure_url,
-        cdae: item.cdae_figure_url,
-        final: item.final_figure_url,
-      },
-      report_view: item.report_file ? `/static/reports/${item.report_file}` : "",
-      report_download: item.report_file ? `/api/files/reports/${item.report_file}/download` : "",
-    },
-  };
-}
+function bindPageEvents() {
+  $("clearSessionBtn")?.addEventListener("click", () => {
+    persistSessionId("");
+    state.selectedFile = null;
+    const fileInput = $("fileInput");
+    if (fileInput) {
+      fileInput.value = "";
+    }
+    renderSelectedFileChip(null);
+    renderWelcomeMessage();
+    setChatStatus("会话已清空。");
+  });
 
-async function loadModelInfo() {
-  const response = await getCurrentModel();
-  if (!response.success) {
-    setBadge($("backendStatus"), "异常", "error");
-    $("modelInfoBox").innerHTML = `<p class="error-text">${escapeHtml(normalizeErrorMessage(response.error_message, "模型信息加载失败"))}</p>`;
-    return;
-  }
-  setBadge($("backendStatus"), "已连接", "success");
-  state.currentModel = response.data || {};
-  $("topModelVersion").textContent = state.currentModel.model_version || "未知";
-  renderModelInfo(state.currentModel);
-  const check = await checkCurrentModel(state.currentModel.model_version);
-  const data = check.data || {};
-  const missingCount = (data.missing_files || []).length;
-  setBadge($("topArtifactStatus"), missingCount ? "有缺失" : "正常", missingCount ? "warning" : "success");
-}
+  $("skillsButton")?.addEventListener("click", openSkillsPanel);
+  $("skillsManageBtn")?.addEventListener("click", openSkillsPanel);
+  $("closeSkillsPanelBtn")?.addEventListener("click", closeSkillsPanel);
+  $("skillsPanelBackdrop")?.addEventListener("click", closeSkillsPanel);
+  $("refreshSkillsBtn")?.addEventListener("click", refreshSkillsPanel);
+  $("uploadSkillBtn")?.addEventListener("click", () => $("skillZipInput")?.click());
+  $("skillZipInput")?.addEventListener("change", handleSkillZipSelect);
 
-async function checkModelFiles() {
-  const response = await checkCurrentModel(state.currentModel?.model_version);
-  const data = response.data || {};
-  const missing = data.missing_files || [];
-  setBadge($("topArtifactStatus"), missing.length ? "有缺失" : "正常", missing.length ? "warning" : "success");
-  appendChatMessage(
-    "agent",
-    "Agent",
-    `<p>${escapeHtml(missing.length ? `模型文件检查完成，缺失 ${missing.length} 个文件。` : "模型文件检查完成，核心文件齐全。")}</p>${renderJsonDetails("检查结果", data)}`,
-    "模型检查"
-  );
-}
-
-function addWelcomeMessages() {
-  $("chatMessages").innerHTML = "";
-  appendChatMessage(
-    "system",
-    "系统",
-    `<p>你好，我是 RamanAgent。你可以直接问基础问题、聊几句，也可以上传 CSV 做拉曼分析。</p><p class="muted">当前会话会保存在本地浏览器，刷新后可继续沿用同一个 session_id。</p>`,
-    state.sessionId ? `已恢复 ${state.sessionId}` : "新会话"
-  );
-}
-
-function clearCurrentSession() {
-  persistSessionId("");
-  state.latestAnalysis = null;
-  $("chatInput").value = "";
-  setError("");
-  addWelcomeMessages();
-  setChatStatus("已清空当前会话");
-}
-
-function bindEvents() {
-  $("sendChatBtn").addEventListener("click", () => sendChat());
-  $("chatInput").addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      sendChat();
+  $("modelListBtn")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (state.modelListOpen) {
+      closeModelList();
+    } else {
+      openModelList();
     }
   });
-  document.querySelectorAll(".quick-actions button").forEach((button) => {
-    button.addEventListener("click", () => sendChat(button.dataset.question));
-  });
-  $("csvFile").addEventListener("change", () => {
-    $("fileName").textContent = $("csvFile").files[0]?.name || "选择 CSV 光谱文件";
-  });
-  $("analyzeBtn").addEventListener("click", submitAnalysis);
-  $("checkModelBtn").addEventListener("click", checkModelFiles);
-  $("refreshHistoryBtn").addEventListener("click", refreshHistory);
-  $("clearSessionBtn").addEventListener("click", clearCurrentSession);
-  $("figureModalCloseBtn").addEventListener("click", closeFigureModal);
-  $("figureModal").addEventListener("click", (event) => {
-    if (event.target?.dataset?.closeModal === "true") {
-      closeFigureModal();
+  $("closeModelListBtn")?.addEventListener("click", closeModelList);
+  $("recentExperimentBtn")?.addEventListener("click", () => sendChatMessage("最近实验"));
+  $("refreshDashboardBtn")?.addEventListener("click", refreshDashboard);
+
+  document.addEventListener("click", (event) => {
+    const wrap = document.querySelector(".model-menu-wrap");
+    if (state.modelListOpen && wrap && !wrap.contains(event.target)) {
+      closeModelList();
     }
   });
+
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
-      closeFigureModal();
+      closeSkillsPanel();
+      closeModelList();
     }
   });
-  ["historyKeyword", "historyModelVersion", "historyMinPrediction", "historyMaxPrediction", "historyQualityLevel", "historyBaselineLevel"].forEach(
-    (id) => {
-      $(id).addEventListener("change", refreshHistory);
+}
+
+async function loadStatus() {
+  const currentModelResponse = await getCurrentModel();
+  if (!currentModelResponse.success) {
+    throw new Error(currentModelResponse.error_message || "获取当前模型失败");
+  }
+
+  state.currentModel = currentModelResponse.data || {};
+  $("backendStatus").textContent = "已连接";
+  $("topModelVersion").textContent = state.currentModel.model_version || state.modelsPayload.current_model || "未知";
+
+  const artifactResponse = await checkCurrentModel(state.currentModel.model_version);
+  if (!artifactResponse.success) {
+    $("topArtifactStatus").textContent = artifactResponse.error_message || "异常";
+    return;
+  }
+
+  const missingFiles = (artifactResponse.data || {}).missing_files || [];
+  $("topArtifactStatus").textContent = missingFiles.length ? `缺失 ${missingFiles.length} 个` : "正常";
+}
+
+async function loadStatusSafely() {
+  try {
+    await loadStatus();
+  } catch (error) {
+    console.error("加载状态失败：", error);
+    $("backendStatus").textContent = "连接异常";
+    $("topModelVersion").textContent = state.modelsPayload.current_model || "加载失败";
+    $("topArtifactStatus").textContent = "检查失败";
+  }
+}
+
+async function loadModels() {
+  const response = await getAgentModels();
+  if (!response.success) {
+    throw new Error(response.error_message || "加载模型列表失败");
+  }
+  state.modelsPayload = response;
+  renderModelList(response.models || [], response.current_model || "");
+  if (response.current_model) {
+    $("topModelVersion").textContent = response.current_model;
+  }
+}
+
+async function loadModelsSafely() {
+  try {
+    await loadModels();
+  } catch (error) {
+    console.error("加载模型列表失败：", error);
+    const body = $("modelListBody");
+    if (body) {
+      body.innerHTML = `<div class="model-list-empty">${escapeHtml(error.message || "模型列表加载失败")}</div>`;
     }
-  );
+  }
 }
 
-function init() {
-  renderSessionState();
-  setChatStatus(state.sessionId ? `当前会话：${state.sessionId}` : "尚未创建会话");
-  addWelcomeMessages();
-  bindEvents();
-  loadModelInfo();
-  refreshHistory();
+async function loadSkills() {
+  const response = await fetchSkills();
+  if (!response.success) {
+    throw new Error(response.error_message || "加载 Skills 失败");
+  }
+  state.skillsPayload = response;
+  renderSkillsButton(response);
+  renderSkillsPanel(response);
 }
 
-init();
+async function loadSkillsSafely() {
+  const target = $("skillsButtonCount");
+  if (target) {
+    target.textContent = "加载中";
+  }
+
+  try {
+    await loadSkills();
+  } catch (error) {
+    state.skillsPayload = null;
+    renderSkillsButtonError(error);
+  }
+}
+
+async function refreshDashboard() {
+  if (state.refreshingDashboard) {
+    return;
+  }
+  state.refreshingDashboard = true;
+  const button = $("refreshDashboardBtn");
+  const originalText = button?.textContent || "刷新";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "刷新中...";
+  }
+  console.log("开始刷新工作台信息");
+  const results = await Promise.allSettled([loadStatusSafely(), loadModelsSafely(), loadSkillsSafely()]);
+  results.forEach((result, index) => {
+    if (result.status === "rejected") {
+      console.error(`刷新任务 ${index + 1} 失败：`, result.reason);
+    }
+  });
+  if (state.modelListOpen) {
+    renderModelList(state.modelsPayload.models || [], state.modelsPayload.current_model || "");
+  }
+  console.log("工作台刷新完成");
+  state.refreshingDashboard = false;
+  if (button) {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
+async function sendChatMessage(presetMessage = "") {
+  if (state.chatBusy) {
+    return;
+  }
+
+  const input = $("messageInput");
+  const message = (presetMessage || input?.value || "").trim();
+  const selectedFile = state.selectedFile;
+  const timeoutMs = getChatRequestTimeout({ hasFile: Boolean(selectedFile), message });
+
+  if (!message && !selectedFile) {
+    setChatStatus("请输入消息，或者先选择一个 CSV 文件。");
+    return;
+  }
+
+  appendMessage("user", `<p>${escapeHtml(message || "请分析这个 CSV 光谱文件")}</p>`, "text");
+  if (selectedFile) {
+    appendFileCard(selectedFile);
+  }
+
+  if (input) {
+    input.value = "";
+    autoResizeTextarea();
+  }
+
+  setBusy(true, selectedFile ? "正在上传 CSV 并分析..." : "正在思考...");
+  renderTypingMessage(selectedFile ? "正在进行光谱分析，可能需要几十秒，请稍候..." : "正在处理，请稍候...");
+
+  try {
+    const response = await sendAgentChat({
+      message,
+      sessionId: state.sessionId || "",
+      debug: $("chatDebug")?.checked || false,
+      file: selectedFile,
+      metadata: { remarks: "", timeoutMs },
+    });
+
+    removeTypingMessage();
+    setBusy(false);
+
+    if (response.session_id) {
+      persistSessionId(response.session_id);
+    }
+
+    if (!response.success) {
+      console.error("发送消息失败：", response.error_message);
+      const errorText = String(response.error_message || "未知错误");
+      const friendlyMessage = errorText.includes("请求超时")
+        ? `发送失败：${escapeHtml(errorText)}。当前任务可能仍在后台处理中，你可以稍后重试，已选择的文件会保留。`
+        : `发送失败：${escapeHtml(errorText)}`;
+      appendMessage("assistant", `<p class="error-message">${friendlyMessage}</p>`, "error");
+      return;
+    }
+
+    renderAssistantResponse(response);
+    state.selectedFile = null;
+    const fileInput = $("fileInput");
+    if (fileInput) {
+      fileInput.value = "";
+    }
+    renderSelectedFileChip(null);
+    if (input) {
+      input.value = "";
+    }
+    autoResizeTextarea();
+    loadStatusSafely();
+  } catch (error) {
+    removeTypingMessage();
+    setBusy(false);
+    console.error("发送消息失败：", error);
+    appendMessage("assistant", `<p class="error-message">发送失败：${escapeHtml(error.message || "未知错误")}</p>`, "error");
+  }
+}
+
+function restoreSessionIfNeeded() {
+  persistSessionId(state.sessionId);
+}
+
+function initApp() {
+  if (state.initialized) {
+    return;
+  }
+  state.initialized = true;
+
+  bindComposerEvents();
+  bindPageEvents();
+  restoreSessionIfNeeded();
+  renderWelcomeMessage();
+  autoResizeTextarea();
+  setChatStatus(state.sessionId ? `当前会话：${state.sessionId}` : "可以直接提问，或上传 CSV 后发送。");
+  loadModelsSafely();
+  loadStatusSafely();
+  loadSkillsSafely();
+}
+
+initApp();

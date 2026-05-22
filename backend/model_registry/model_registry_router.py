@@ -54,3 +54,11 @@ def set_current_model(request: SetCurrentModelRequest) -> dict:
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["error_message"])
     return result
+
+
+@router.patch("/current")
+def patch_current_model(request: SetCurrentModelRequest) -> dict:
+    result = service.set_default_model(request.model_version)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["error_message"])
+    return result

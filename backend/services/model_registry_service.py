@@ -16,6 +16,7 @@ from raman_core.methanol.config import ARTIFACT_DIR, PROJECT_ROOT, ensure_dirs
 
 
 REGISTRY_PATH = ARTIFACT_DIR / "model_registry.json"
+MODEL_CONFIG_PATH = PROJECT_ROOT / "backend" / "data" / "model_config.json"
 
 
 class ModelRegistryService:
@@ -44,11 +45,35 @@ class ModelRegistryService:
     def _ensure_registry_file(self) -> None:
         ensure_dirs()
         self.artifacts_root.mkdir(parents=True, exist_ok=True)
+        MODEL_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         if not self.registry_path.exists():
             self.registry_path.write_text(
                 json.dumps(DEFAULT_MODEL_REGISTRY, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+        if not MODEL_CONFIG_PATH.exists():
+            MODEL_CONFIG_PATH.write_text(
+                json.dumps({"current_model": DEFAULT_MODEL_VERSION}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+    def _load_model_config_current(self) -> str | None:
+        self._ensure_registry_file()
+        try:
+            raw = json.loads(MODEL_CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(raw, dict):
+            return None
+        current_model = raw.get("current_model")
+        return str(current_model) if current_model else None
+
+    def _write_model_config_current(self, model_id: str) -> None:
+        self._ensure_registry_file()
+        MODEL_CONFIG_PATH.write_text(
+            json.dumps({"current_model": model_id}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def _normalize_model_entry(self, model_id: str, raw: dict[str, Any]) -> dict[str, Any]:
         entry = deepcopy(raw)
@@ -198,7 +223,19 @@ class ModelRegistryService:
         loaded = self.load_registry()
         if not loaded["success"]:
             return None
-        return str((loaded.get("data") or {}).get("default_model"))
+        registry = loaded.get("data") or {}
+        models = registry.get("models") or {}
+        config_model = self._load_model_config_current()
+        if config_model and config_model in models:
+            return config_model
+        return str(registry.get("default_model"))
+
+    def _is_model_available(self, model_id: str) -> bool:
+        validation = self.validate_model_files(model_id)
+        if not validation["success"]:
+            return False
+        missing_files = (validation.get("data") or {}).get("missing_files") or []
+        return len(missing_files) == 0
 
     def list_models(self) -> dict:
         loaded = self.load_registry()
@@ -315,9 +352,52 @@ class ModelRegistryService:
         registry["default_model"] = model_id
         try:
             self.registry_path.write_text(json.dumps(registry, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._write_model_config_current(model_id)
         except Exception as exc:
             return self._failure(f"写入模型注册表失败: {exc}")
         return self.get_default_model()
+
+    def list_models_for_agent(self) -> dict:
+        result = self.list_models()
+        if not result["success"]:
+            return result
+        current_model = self.get_default_model_id()
+        models = []
+        for item in result.get("data") or []:
+            model_name = str(item.get("model_version") or "")
+            available = self._is_model_available(model_name)
+            models.append(
+                {
+                    "name": model_name,
+                    "display_name": model_name,
+                    "available": available,
+                    "enabled": str(item.get("status") or "active") == "active",
+                    "description": str(item.get("model_name") or item.get("notes") or ""),
+                }
+            )
+        return self._success(
+            {
+                "current_model": current_model,
+                "models": models,
+            },
+            result.get("warnings") or [],
+        )
+
+    def switch_current_model_for_agent(self, model_name: str) -> dict:
+        model = self.get_model(model_name)
+        if not model["success"]:
+            return self._failure(f"模型不存在：{model_name}")
+        if not self._is_model_available(model_name):
+            return self._failure(f"模型不可用：{model_name}，请先检查模型文件是否完整。")
+        update_result = self.set_default_model(model_name)
+        if not update_result["success"]:
+            return update_result
+        return {
+            "success": True,
+            "current_model": model_name,
+            "message": "当前模型已切换",
+            "warnings": update_result.get("warnings") or [],
+        }
 
     # 兼容旧命名，避免现有调用方失效。
     def get_current_model(self) -> dict:

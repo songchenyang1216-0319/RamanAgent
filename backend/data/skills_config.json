@@ -1,0 +1,70 @@
+{
+  "skills": {
+    "spectral_file_skill": {
+      "enabled": true,
+      "actions": {
+        "load_csv": true,
+        "validate_csv": true,
+        "inspect_spectrum": true,
+        "extract_metadata": true
+      }
+    },
+    "spectral_preprocessing_skill": {
+      "enabled": true,
+      "actions": {
+        "sg_smoothing": true,
+        "normalization": true,
+        "als_baseline_correction": true,
+        "baseline_subtraction": true,
+        "cdae_denoise": true,
+        "cae_baseline_prediction": true,
+        "resample_wavenumber_axis": true,
+        "full_preprocess_pipeline": true
+      }
+    },
+    "methanol_analysis_skill": {
+      "enabled": true,
+      "actions": {
+        "predict_methanol_concentration": true,
+        "explain_prediction": true,
+        "get_model_info": true,
+        "check_prediction_input": true
+      }
+    },
+    "spectral_visualization_skill": {
+      "enabled": true,
+      "actions": {
+        "plot_raw_spectrum": true,
+        "plot_preprocessed_spectrum": true,
+        "plot_baseline_comparison": true,
+        "plot_prediction_result": true
+      }
+    },
+    "experiment_report_skill": {
+      "enabled": true,
+      "actions": {
+        "generate_summary": true,
+        "generate_markdown_report": true,
+        "generate_experiment_record": true,
+        "export_report": true
+      }
+    },
+    "agent_system_skill": {
+      "enabled": true,
+      "actions": {
+        "current_model": true,
+        "model_health_check": true,
+        "upload_help": true,
+        "recent_experiments": true,
+        "clear_session": true,
+        "list_skills": true
+      }
+    },
+    "agent-skill-upload-test": {
+      "enabled": true,
+      "actions": {
+        "run_uploaded_skill": true
+      }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+[
+  {
+    "name": "agent_skill_upload_test_v1",
+    "display_name": "agent_skill_upload_test_v1",
+    "description": "用户上传的 Skill 压缩包，已保存并解压，等待后续加载。",
+    "upload_status": "pending_load",
+    "uploaded_at": "2026-05-22T17:27:59",
+    "archive_path": "backend/data/skill_uploads/agent_skill_upload_test_v1_20260522_172759.zip",
+    "extract_dir": "backend/skills/custom/agent_skill_upload_test_v1",
+    "reload_required": true,
+    "unavailable_reason": "当前实现已完成保存与解压，需刷新 Skills 列表；若未接入自动注册，则重启后再加载。",
+    "usage": "上传成功后会在 Skills 列表中显示为 source: uploaded / 待加载。",
+    "source": "uploaded"
+  }
+]

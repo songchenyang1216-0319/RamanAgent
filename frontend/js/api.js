@@ -12,40 +12,72 @@ function buildUrl(path, params = {}) {
 }
 
 async function requestJson(path, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || 8000);
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(buildUrl(path, options.params), {
       method: options.method || "GET",
       headers: options.body instanceof FormData ? undefined : { "Content-Type": "application/json" },
       body: options.body instanceof FormData ? options.body : options.body ? JSON.stringify(options.body) : undefined,
+      signal: controller.signal,
     });
+    clearTimeout(timer);
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
       return {
         success: false,
         error_message: data.detail || data.error_message || `请求失败: ${response.status}`,
         status: response.status,
-        status_text: response.statusText,
         data,
       };
     }
-    return {
-      ...data,
-      status: response.status,
-      status_text: response.statusText,
-    };
+    return { success: true, ...data, status: response.status };
   } catch (error) {
+    clearTimeout(timer);
     return {
       success: false,
-      error_message: error.message || "请求失败，请确认后端服务是否已经启动。",
+      error_message:
+        error.name === "AbortError"
+          ? `请求超时（${timeoutMs}ms），请稍后重试。`
+          : error.message || "请求失败，请确认后端服务是否已经启动。",
       status: 0,
     };
   }
 }
 
-export async function chatWithAgent(message, debug = false, sessionId = null) {
+export async function sendAgentChat({ message = "", sessionId = null, debug = false, file = null, metadata = {} }) {
+  const timeoutMs = Number(metadata.timeoutMs || 15000);
+  if (file) {
+    const formData = new FormData();
+    formData.append("message", message || "请分析这个甲醇拉曼光谱");
+    formData.append("debug", String(Boolean(debug)));
+    formData.append("file", file);
+    if (sessionId) {
+      formData.append("session_id", sessionId);
+    }
+    ["sample_name", "sample_type", "operator", "instrument", "laser_power", "integration_time", "remarks", "remark"].forEach(
+      (field) => {
+        if (metadata[field]) {
+          formData.append(field, metadata[field]);
+        }
+      }
+    );
+    return requestJson("/api/agent/chat", {
+      method: "POST",
+      body: formData,
+      timeoutMs,
+    });
+  }
+
   return requestJson("/api/agent/chat", {
     method: "POST",
-    body: { message, debug, session_id: sessionId || undefined },
+    body: {
+      message,
+      debug,
+      session_id: sessionId || undefined,
+    },
+    timeoutMs,
   });
 }
 
@@ -56,7 +88,6 @@ export async function analyzeFile(file, metadata = {}, sessionId = null) {
   if (sessionId) {
     formData.append("session_id", sessionId);
   }
-
   ["sample_name", "sample_type", "operator", "instrument", "laser_power", "integration_time", "remarks"].forEach(
     (field) => {
       if (metadata[field]) {
@@ -64,7 +95,6 @@ export async function analyzeFile(file, metadata = {}, sessionId = null) {
       }
     }
   );
-
   return requestJson("/api/agent/analyze-file", {
     method: "POST",
     body: formData,
@@ -80,12 +110,46 @@ export async function checkCurrentModel(modelVersion) {
   return requestJson(`/api/models/${encodeURIComponent(version)}/check`);
 }
 
-export async function listHistory(params = {}) {
-  return requestJson("/api/history", { params });
+export async function getAgentModels() {
+  return requestJson("/api/agent/models", { timeoutMs: 8000 });
 }
 
-export async function getHistoryDetail(taskId) {
-  return requestJson(`/api/history/${encodeURIComponent(taskId)}`);
+export async function switchAgentModel(modelName) {
+  return requestJson("/api/agent/models/current", {
+    method: "PATCH",
+    body: { model_name: modelName },
+    timeoutMs: 12000,
+  });
+}
+
+export async function loadSkills() {
+  return requestJson("/api/agent/skills", { timeoutMs: 8000 });
+}
+
+export async function uploadSkillZip(file) {
+  const formData = new FormData();
+  formData.append("file", file);
+  return requestJson("/api/agent/skills/upload", {
+    method: "POST",
+    body: formData,
+    timeoutMs: 30000,
+  });
+}
+
+export async function setSkillEnabled(skillName, enabled) {
+  return requestJson(`/api/agent/skills/${encodeURIComponent(skillName)}/enabled`, {
+    method: "PATCH",
+    body: { enabled: Boolean(enabled) },
+    timeoutMs: 8000,
+  });
+}
+
+export async function setActionEnabled(skillName, actionName, enabled) {
+  return requestJson(`/api/agent/skills/${encodeURIComponent(skillName)}/actions/${encodeURIComponent(actionName)}/enabled`, {
+    method: "PATCH",
+    body: { enabled: Boolean(enabled) },
+    timeoutMs: 8000,
+  });
 }
 
 export function toAssetUrl(url) {
