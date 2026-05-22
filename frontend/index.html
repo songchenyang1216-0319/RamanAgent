@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RamanAgent 甲醇含量预测系统</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">RamanAgent</p>
+        <h1>甲醇拉曼光谱 Agent 工作台</h1>
+      </div>
+      <div class="status-strip">
+        <div><span>后端</span><strong id="backendStatus">检查中</strong></div>
+        <div><span>当前模型</span><strong id="topModelVersion">加载中</strong></div>
+        <div><span>模型文件</span><strong id="topArtifactStatus">检查中</strong></div>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="panel chat-panel">
+        <div class="panel-title">
+          <h2>Agent 对话</h2>
+          <label class="switch"><input id="chatDebug" type="checkbox" /> debug</label>
+        </div>
+        <div class="quick-actions">
+          <button data-question="当前用的是哪个模型？">当前模型</button>
+          <button data-question="检查模型文件是否齐全">检查模型</button>
+          <button data-question="查看最近实验记录">最近实验</button>
+          <button data-question="我应该如何上传样品？">上传帮助</button>
+        </div>
+        <div class="session-bar">
+          <div>
+            <span>当前会话</span>
+            <strong id="sessionIdText">未创建</strong>
+          </div>
+          <button id="clearSessionBtn" type="button" class="secondary-action">清空会话</button>
+        </div>
+        <div id="chatMessages" class="chat-messages"></div>
+        <div class="chat-input-row">
+          <input id="chatInput" type="text" placeholder="问问 RamanAgent，例如：当前用的是哪个模型？" />
+          <button id="sendChatBtn" type="button">发送</button>
+        </div>
+        <p id="chatStatus" class="muted helper-text"></p>
+      </section>
+
+      <section class="panel upload-panel">
+        <div class="panel-title">
+          <h2>上传分析</h2>
+          <span id="analysisStatus" class="badge neutral">未上传</span>
+        </div>
+        <label class="file-picker">
+          <input id="csvFile" type="file" accept=".csv" />
+          <span id="fileName">选择 CSV 光谱文件</span>
+        </label>
+        <div class="form-grid">
+          <label>样品名<input id="sampleName" type="text" /></label>
+          <label>样品类型<input id="sampleType" type="text" /></label>
+          <label>操作人<input id="operatorName" type="text" /></label>
+          <label>仪器<input id="instrument" type="text" /></label>
+          <label>激光功率<input id="laserPower" type="text" /></label>
+          <label>积分时间<input id="integrationTime" type="text" /></label>
+          <label class="span-2">备注<textarea id="remarks" rows="3"></textarea></label>
+        </div>
+        <button id="analyzeBtn" class="primary-action" type="button">开始分析</button>
+        <p id="analysisProgress" class="muted helper-text"></p>
+        <p id="errorText" class="error-text"></p>
+      </section>
+
+      <section class="panel result-panel">
+        <div class="panel-title">
+          <h2>结果概览</h2>
+          <span id="historyTaskBadge" class="badge neutral">暂无任务</span>
+        </div>
+        <div id="analysisSnapshot" class="snapshot-grid"></div>
+        <div id="predictionCards" class="metric-grid"></div>
+        <div id="pipelineText" class="pipeline"></div>
+        <div id="llmExplanation" class="markdown-box">完成一次分析后，这里会显示解释内容。</div>
+      </section>
+
+      <section class="panel analysis-panel">
+        <div class="panel-title">
+          <h2>专业光谱分析</h2>
+          <span id="overallLevel" class="badge neutral">未生成</span>
+        </div>
+        <div id="professionalSummary" class="summary-list"></div>
+        <div class="analysis-grid">
+          <div>
+            <h3>光谱质量</h3>
+            <div id="qualityBox" class="info-list"></div>
+          </div>
+          <div>
+            <h3>基线质量</h3>
+            <div id="baselineBox" class="info-list"></div>
+          </div>
+        </div>
+        <h3>主要峰</h3>
+        <div id="peaksTable" class="table-wrap"></div>
+        <h3>相似历史样品</h3>
+        <div id="similarRecords" class="table-wrap"></div>
+      </section>
+
+      <section class="panel model-panel">
+        <div class="panel-title">
+          <h2>模型与实验信息</h2>
+          <button id="checkModelBtn" type="button" class="secondary-action">检查模型文件</button>
+        </div>
+        <div id="modelInfoBox" class="info-list"></div>
+        <div id="experimentInfoBox" class="info-list"></div>
+      </section>
+
+      <section class="panel figures-panel">
+        <div class="panel-title">
+          <h2>图谱与报告</h2>
+          <div id="reportLinks" class="link-row"></div>
+        </div>
+        <div id="figureGrid" class="figure-grid"></div>
+      </section>
+
+      <section class="panel history-panel">
+        <div class="panel-title">
+          <h2>历史记录</h2>
+          <div class="panel-actions">
+            <span id="historyStatus" class="muted">未加载</span>
+            <button id="refreshHistoryBtn" type="button" class="secondary-action">刷新</button>
+          </div>
+        </div>
+        <div class="filter-grid">
+          <input id="historyKeyword" type="text" placeholder="关键词" />
+          <input id="historyModelVersion" type="text" placeholder="模型版本" />
+          <input id="historyMinPrediction" type="number" step="0.0001" placeholder="最小预测值" />
+          <input id="historyMaxPrediction" type="number" step="0.0001" placeholder="最大预测值" />
+          <input id="historyQualityLevel" type="text" placeholder="质量等级" />
+          <input id="historyBaselineLevel" type="text" placeholder="基线等级" />
+        </div>
+        <div id="historyList" class="history-list"></div>
+        <div id="historyDetail" class="history-detail hidden"></div>
+      </section>
+    </main>
+  </div>
+  <div id="figureModal" class="figure-modal hidden" role="dialog" aria-modal="true" aria-label="图谱查看器">
+    <div class="figure-modal-backdrop" data-close-modal="true"></div>
+    <div class="figure-modal-card">
+      <div class="figure-modal-header">
+        <strong id="figureModalTitle">图谱预览</strong>
+        <div class="panel-actions">
+          <a id="figureModalOpenLink" href="#" target="_blank" rel="noopener noreferrer">新窗口打开</a>
+          <button id="figureModalCloseBtn" type="button" class="secondary-action">关闭</button>
+        </div>
+      </div>
+      <img id="figureModalImage" alt="图谱预览" />
+    </div>
+  </div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

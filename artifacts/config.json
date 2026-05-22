@@ -1,0 +1,38 @@
+{
+  "target_length": 1024,
+  "sg_window": 21,
+  "sg_order": 4,
+  "als_lam": 100000.0,
+  "als_p": 0.01,
+  "als_niter": 10,
+  "device": "cuda",
+  "svr_weight": 0.6,
+  "rf_weight": 0.4,
+  "distance_threshold": 0.12927835211157798,
+  "metrics": {
+    "SVR": {
+      "R2": 0.9999143506370733,
+      "RMSE": 0.4184569591796898,
+      "MAE": 0.29204462255530433
+    },
+    "RF": {
+      "R2": 0.9997990173194999,
+      "RMSE": 0.6410147802140208,
+      "MAE": 0.34950020739665383
+    },
+    "Fusion": {
+      "R2": 0.9998840511331222,
+      "RMSE": 0.48688005126638556,
+      "MAE": 0.29575791259744055
+    }
+  },
+  "artifact_dir": "artifacts",
+  "baseline_power": 1.0,
+  "title_plot_1": "统一波数轴后的原始光谱",
+  "title_plot_2": "SG平滑 + ALS去基线 + 归一化后光谱",
+  "title_plot_3": "SG平滑 + ALS去基线 + 归一化 + CDAE去噪后光谱",
+  "title_plot_4": "最终回归输入光谱（SG平滑 -> CDAE去噪 -> CAE+预测基线 -> 去噪谱-预测基线）",
+  "pipeline_plot_2": "统一波数轴 -> SG平滑 -> ALS去基线 -> 归一化",
+  "pipeline_plot_3": "统一波数轴 -> SG平滑 -> ALS去基线 -> 归一化 -> CDAE去噪",
+  "pipeline_plot_4": "统一波数轴 -> SG平滑 -> CDAE去噪 -> CAE+预测基线 -> 去噪谱-预测基线 -> 最终回归预测"
+}

@@ -1,0 +1,29 @@
+{
+  "model_version": "methanol_v1",
+  "dataset_path": "data/processed/example_dataset.csv",
+  "sample_count": 65,
+  "concentration_range": [
+    0,
+    100
+  ],
+  "preprocessing_params": {
+    "target_length": 1024,
+    "sg_window": 21,
+    "sg_order": 4,
+    "als_lam": 100000.0,
+    "als_p": 0.01,
+    "als_niter": 10
+  },
+  "model_params": {
+    "svr_weight": 0.6,
+    "rf_weight": 0.4,
+    "distance_threshold": 0.12927835211157798
+  },
+  "evaluation_metrics": {
+    "rmse": 0.48688005126638556,
+    "mae": 0.29575791259744055,
+    "r2": 0.9998840511331222
+  },
+  "trained_at": "2026-05-14",
+  "notes": "请复制为 training_meta.json 并填入真实训练记录。"
+}
