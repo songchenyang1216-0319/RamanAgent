@@ -16,11 +16,11 @@ class AgentSystemSkill(BaseSkill):
 
     name = "agent_system_skill"
     display_name = "Agent 系统能力"
-    description = "负责 RamanAgent 自身状态查询，包括当前模型、模型健康检查、最近实验、上传帮助、会话信息、Skill 列表等。"
+    description = "负责当前 Agent 的系统状态查询，包括模型、Skill 列表、会话上下文、最近记录和上传帮助。"
     category = "系统检查"
     requires_file = False
     supported_file_types: list[str] = []
-    usage = "可以直接询问当前模型、检查模型、查看最近实验，或查询当前 Agent 已安装的能力。"
+    usage = "可以直接询问当前模型、检查模型、查看最近记录，或查询当前 Agent 已安装的能力。"
 
     def __init__(self, skill_list_provider=None) -> None:
         self._model_skill = ModelHealthCheckSkill()
@@ -47,7 +47,7 @@ class AgentSystemSkill(BaseSkill):
             {
                 "name": "upload_help",
                 "display_name": "上传帮助",
-                "description": "说明如何上传 CSV 光谱文件。",
+                "description": "说明如何上传文件并触发对应 Skill。",
                 "enabled": True,
                 "available": True,
                 "status": "ready",
@@ -55,8 +55,8 @@ class AgentSystemSkill(BaseSkill):
             },
             {
                 "name": "recent_experiments",
-                "display_name": "最近实验",
-                "description": "列出最近实验记录。",
+                "display_name": "最近记录",
+                "description": "列出最近分析记录。",
                 "enabled": True,
                 "available": True,
                 "status": "ready",
@@ -114,7 +114,7 @@ class AgentSystemSkill(BaseSkill):
                 action_name=action_name,
                 summary="上传帮助已准备好。",
                 data={
-                    "message": "点击聊天输入框左侧的 + 选择 CSV 文件，然后可以直接发送，或补充一段说明文字后发送。CSV 建议至少包含两列：第一列波数，第二列强度。"
+                    "message": "点击聊天输入框左侧的 + 选择文件后发送。普通文档、表格、压缩包会优先走通用文件处理 Skill；Raman 光谱 CSV 会进入 Raman 光谱处理 Skill。"
                 },
             )
 
@@ -124,7 +124,7 @@ class AgentSystemSkill(BaseSkill):
                 success=True,
                 skill_name=self.name,
                 action_name=action_name,
-                summary=f"最近实验已查询，共返回 {len(history.get('items', []) or [])} 条记录。",
+                summary=f"最近记录已查询，共返回 {len(history.get('items', []) or [])} 条记录。",
                 data=history,
             )
 

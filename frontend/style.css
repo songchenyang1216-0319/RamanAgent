@@ -417,6 +417,46 @@ button {
   gap: 12px;
 }
 
+.skill-trace-banner {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px solid rgba(15, 111, 136, 0.16);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(233, 245, 248, 0.95), rgba(248, 251, 252, 0.95));
+}
+
+.skill-trace-title {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.skill-trace-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.skill-trace-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border: 1px solid rgba(15, 111, 136, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #0f172a;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.skill-trace-tag.muted {
+  color: var(--muted);
+}
+
 .analysis-hero,
 .analysis-grid,
 .analysis-figures,
@@ -816,6 +856,13 @@ button {
   gap: 12px;
 }
 
+.skill-card-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .skill-card-title {
   display: flex;
   gap: 12px;
@@ -930,6 +977,16 @@ button {
   border-radius: 999px;
   background: #fff;
   color: var(--text);
+}
+
+.skill-toggle-button.danger {
+  border-color: rgba(180, 35, 24, 0.22);
+  background: rgba(180, 35, 24, 0.06);
+  color: var(--error);
+}
+
+.skill-toggle-button.danger:hover {
+  background: rgba(180, 35, 24, 0.1);
 }
 
 .skill-toggle-button.small {

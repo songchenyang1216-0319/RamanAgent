@@ -17,7 +17,7 @@ from raman_core.methanol.config import FIGURE_DIR, OUTPUT_DIR, PROJECT_ROOT, REP
 ensure_dirs()
 
 
-app = FastAPI(title="RamanAgent API")
+app = FastAPI(title="Multi-Skill Agent API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -51,7 +51,7 @@ def startup() -> None:
 @app.get("/")
 def root() -> dict:
     """根接口，用于快速确认服务已启动。"""
-    return {"message": "RamanAgent API is running"}
+    return {"message": "Multi-Skill Agent API is running"}
 
 
 @app.get("/health")

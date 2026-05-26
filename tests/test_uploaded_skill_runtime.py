@@ -57,6 +57,7 @@ def test_uploaded_skill_chat_route() -> None:
 
             discovered = discover_uploaded_package_skills(custom_root)
             assert discovered
+            assert discovered[0].skill_mode == "executable"
             client = TestClient(app)
             response = client.post(
                 "/api/agent/chat",
@@ -65,10 +66,12 @@ def test_uploaded_skill_chat_route() -> None:
             payload = response.json()
             assert response.status_code == 200
             assert payload["success"] is True
+            assert payload["skill_mode"] == "executable"
             assert payload["source"] == "skill_execution"
-            assert "SKILL_UPLOAD_TEST_OK_v1" in payload["reply"]
-            assert "skill_name=agent-skill-upload-test" in payload["reply"]
-            assert "SKILL_SCRIPT_EXEC_OK_v1" in payload["reply"]
+            assert payload["data"]["marker"] == "SKILL_UPLOAD_TEST_OK_v1"
+            assert payload["skill_name"] == "agent-skill-upload-test"
+            assert payload["data"]["script_check"] == "passed"
+            assert payload["data"]["script_result"]["marker"] == "SKILL_SCRIPT_EXEC_OK_v1"
     finally:
         registry.CUSTOM_SKILL_ROOT = original_root
 

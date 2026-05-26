@@ -50,7 +50,7 @@ export async function sendAgentChat({ message = "", sessionId = null, debug = fa
   const timeoutMs = Number(metadata.timeoutMs || 15000);
   if (file) {
     const formData = new FormData();
-    formData.append("message", message || "请分析这个甲醇拉曼光谱");
+    formData.append("message", message || "请分析这个文件");
     formData.append("debug", String(Boolean(debug)));
     formData.append("file", file);
     if (sessionId) {
@@ -84,7 +84,7 @@ export async function sendAgentChat({ message = "", sessionId = null, debug = fa
 export async function analyzeFile(file, metadata = {}, sessionId = null) {
   const formData = new FormData();
   formData.append("file", file);
-  formData.append("message", metadata.message || "请分析这个 Raman CSV 文件");
+  formData.append("message", metadata.message || "请分析这个文件");
   if (sessionId) {
     formData.append("session_id", sessionId);
   }
@@ -140,6 +140,13 @@ export async function setSkillEnabled(skillName, enabled) {
   return requestJson(`/api/agent/skills/${encodeURIComponent(skillName)}/enabled`, {
     method: "PATCH",
     body: { enabled: Boolean(enabled) },
+    timeoutMs: 8000,
+  });
+}
+
+export async function deleteSkill(skillName) {
+  return requestJson(`/api/agent/skills/${encodeURIComponent(skillName)}`, {
+    method: "DELETE",
     timeoutMs: 8000,
   });
 }

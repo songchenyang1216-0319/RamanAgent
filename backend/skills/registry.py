@@ -12,11 +12,7 @@ from raman_core.methanol.config import PROJECT_ROOT
 
 from .agent_system_skill import AgentSystemSkill
 from .base import BaseSkill, SkillResult
-from .experiment_report_skill import ExperimentReportSkill
-from .methanol_analysis_skill import MethanolAnalysisSkill
-from .spectral_file_skill import SpectralFileSkill
-from .spectral_preprocessing_skill import SpectralPreprocessingSkill
-from .spectral_visualization_skill import SpectralVisualizationSkill
+from .raman_spectroscopy_skill import RamanSpectroscopySkill
 from .upload_service import list_uploaded_skills
 from .uploaded_package_skill import UploadedPackageSkill, discover_uploaded_package_skills
 
@@ -72,6 +68,23 @@ def _build_default_config() -> dict[str, Any]:
 def _write_config(config: dict[str, Any]) -> None:
     _ensure_config_dir()
     SKILLS_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def remove_skill_config_entries(skill_names: set[str] | list[str] | tuple[str, ...]) -> dict[str, Any]:
+    """删除 skills_config.json 中指定 Skill 的配置项。"""
+    config, _ = _load_skills_config()
+    skill_names_set = {str(item).strip() for item in skill_names if str(item).strip()}
+    if not skill_names_set:
+        return {"removed_skill_names": [], "success": True}
+
+    skills = config.setdefault("skills", {})
+    removed = [skill_name for skill_name in skill_names_set if skill_name in skills]
+    for skill_name in removed:
+        skills.pop(skill_name, None)
+
+    if removed:
+        _write_config(config)
+    return {"removed_skill_names": removed, "success": True}
 
 
 def _backup_broken_config() -> None:
@@ -317,25 +330,56 @@ def _skill_list_provider() -> dict[str, Any]:
     return list_skills(include_actions=True)
 
 
-def match_uploaded_skill(message: str) -> tuple[UploadedPackageSkill | None, dict[str, Any] | None]:
+def match_uploaded_skill(message: str, file_suffix: str | None = None) -> tuple[UploadedPackageSkill | None, dict[str, Any] | None]:
     """基于上传 Skill 的 metadata/SKILL.md 做语义匹配。"""
+    candidates: list[tuple[UploadedPackageSkill, int, str]] = []
     best_skill: UploadedPackageSkill | None = None
     best_score = 0
     best_reason = ""
     for skill in discover_uploaded_package_skills(CUSTOM_SKILL_ROOT):
-        score, reason = skill.score_message(message)
+        score, reason = skill.score_message(message, file_suffix=file_suffix)
+        candidates.append((skill, score, reason))
         if score > best_score:
             best_skill = skill
             best_score = score
             best_reason = reason
+
+    if file_suffix:
+        suffix_matches = [(skill, score, reason) for skill, score, reason in candidates if skill.supports_file_suffix(file_suffix)]
+        if len(suffix_matches) == 1:
+            skill, score, reason = suffix_matches[0]
+            return skill, {"score": max(score, 18), "reason": reason or f"file_type:{file_suffix}", "route": "uploaded_skill_suffix_match"}
+        if len(suffix_matches) > 1:
+            suffix_matches.sort(key=lambda item: item[1], reverse=True)
+            skill, score, reason = suffix_matches[0]
+            return skill, {"score": max(score, 18), "reason": reason or f"file_type:{file_suffix}", "route": "uploaded_skill_suffix_match"}
+
+        # 带附件时，优先把文本类文件交给提示词型文档 Skill，避免测试型 executable Skill 抢路由。
+        prompt_only_file_matches = [
+            (skill, score, reason)
+            for skill, score, reason in candidates
+            if skill.skill_mode == "prompt_only" and file_suffix in {".txt", ".md", ".markdown", ".docx", ".pdf", ".html", ".htm"}
+        ]
+        if len(prompt_only_file_matches) == 1:
+            skill, score, reason = prompt_only_file_matches[0]
+            return skill, {
+                "score": max(score, 18),
+                "reason": reason or f"prompt_only_file:{file_suffix}",
+                "route": "uploaded_prompt_only_file_match",
+            }
+        if len(prompt_only_file_matches) > 1:
+            prompt_only_file_matches.sort(key=lambda item: item[1], reverse=True)
+            skill, score, reason = prompt_only_file_matches[0]
+            return skill, {
+                "score": max(score, 18),
+                "reason": reason or f"prompt_only_file:{file_suffix}",
+                "route": "uploaded_prompt_only_file_match",
+            }
+
     if best_skill is None or best_score < 6:
         return None, None
     return best_skill, {"score": best_score, "reason": best_reason, "route": "uploaded_skill_match"}
 
 
-register_skill(SpectralFileSkill())
-register_skill(SpectralPreprocessingSkill())
-register_skill(MethanolAnalysisSkill())
-register_skill(SpectralVisualizationSkill())
-register_skill(ExperimentReportSkill())
+register_skill(RamanSpectroscopySkill())
 register_skill(AgentSystemSkill(skill_list_provider=_skill_list_provider))

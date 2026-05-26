@@ -49,6 +49,37 @@ class LLMService:
             except Exception as exc:
                 self.import_error_message = f"初始化大模型客户端失败: {exc}"
 
+    def get_provider_info(self) -> dict[str, Any]:
+        """返回当前大模型平台与配置状态，供 Agent 直接回答“用的是哪家平台”。"""
+        normalized_base_url = (self.base_url or "").strip()
+        lowered_base_url = normalized_base_url.lower()
+        configured = bool(self.api_key)
+
+        provider_name = "未配置平台大模型"
+        provider_label = "未配置"
+        if configured:
+            if "siliconflow" in lowered_base_url or "siliconflow.cn" in lowered_base_url:
+                provider_name = "硅基流动"
+                provider_label = "siliconflow"
+            elif "openai" in lowered_base_url:
+                provider_name = "OpenAI-compatible 平台"
+                provider_label = "openai-compatible"
+            else:
+                provider_name = "OpenAI-compatible 自定义平台"
+                provider_label = "custom-openai-compatible"
+
+        return {
+            "configured": configured,
+            "provider_name": provider_name,
+            "provider_label": provider_label,
+            "base_url": normalized_base_url,
+            "model": self.model,
+            "api_key_configured": configured,
+            "import_ready": self.import_error_message is None,
+            "import_error_message": self.import_error_message,
+            "fallback_mode": not configured,
+        }
+
     def _chat_complete(self, system_prompt: str, user_prompt: str) -> tuple[str, dict | None]:
         """执行一次通用 OpenAI-compatible 对话请求。"""
         if not self.api_key:
@@ -92,6 +123,56 @@ class LLMService:
                 "reply": build_general_chat_local_reply(message, system_context=system_context),
                 "error_message": f"通用对话服务不可用: {exc}",
                 "raw_response": None,
+            }
+
+    def generate_skill_augmented_reply(
+        self,
+        *,
+        skill_context: str,
+        user_message: str,
+        conversation_context: dict | None = None,
+    ) -> dict:
+        """基于提示词型 Skill 上下文生成回复。"""
+        conversation_context = conversation_context or {}
+        system_prompt = (
+            build_general_chat_system_prompt(conversation_context)
+            + "\n\n你正在遵循一个提示词型 Skill 的额外规则。"
+            + "请优先服从下面的 Skill 上下文；如果 Skill 规则与通用对话规则冲突，以 Skill 规则为准。"
+            + "如果 Skill 规则要求总结、翻译、整理、对照或提炼，请严格按照用户要求完成，不要把正常回复误报为失败。"
+            + "\n\n# Skill Context\n"
+            + skill_context
+        )
+        user_prompt = (
+            "请根据上述 Skill 上下文回答用户问题。"
+            "如果 Skill 上下文要求特定输出格式，请尽量遵守。"
+            "不要提及你没有读取到的文件内容，不要编造不存在的脚本执行结果。"
+            f"\n\n用户消息：{user_message}"
+        )
+        document_excerpt = str(conversation_context.get("document_excerpt") or "").strip()
+        if document_excerpt:
+            user_prompt += (
+                "\n\n# 已提取的文件正文片段\n"
+                "下面是系统从用户上传文件中提取出的正文内容，请优先基于这些内容完成总结、翻译、提炼或改写：\n\n"
+                + document_excerpt
+            )
+        try:
+            reply, raw = self._chat_complete(system_prompt, user_prompt)
+            if not reply:
+                return {
+                    "success": False,
+                    "reply": build_general_chat_local_reply(user_message, system_context=conversation_context),
+                    "error_message": "大模型未返回有效内容。",
+                    "raw_response": raw,
+                    "warnings": ["大模型未返回有效内容，已回退本地回复。"],
+                }
+            return {"success": True, "reply": reply, "error_message": None, "raw_response": raw, "warnings": []}
+        except Exception as exc:
+            return {
+                "success": False,
+                "reply": build_general_chat_local_reply(user_message, system_context=conversation_context),
+                "error_message": f"提示词型 Skill 大模型调用失败: {exc}",
+                "raw_response": None,
+                "warnings": [f"提示词型 Skill 大模型调用失败: {exc}"],
             }
 
     def _sanitize_result_for_llm(self, result: dict[str, Any]) -> dict[str, Any]:

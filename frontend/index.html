@@ -3,15 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>RamanAgent 聊天式工作台</title>
+  <title>多功能 Agent 工作台</title>
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
   <div class="app-shell">
     <header class="topbar">
       <div class="topbar-left">
-        <div class="brand-small">RamanAgent</div>
-        <div class="brand-title">甲醇拉曼光谱 Agent 工作台</div>
+        <div class="brand-small">Multi-Skill Agent</div>
+        <div class="brand-title">多功能 Agent 工作台</div>
       </div>
 
       <div class="topbar-right">
@@ -45,7 +45,7 @@
               <div id="modelListBody" class="model-list-body"></div>
             </div>
           </div>
-          <button id="recentExperimentBtn" type="button" class="pill-button" data-question="最近实验">最近实验</button>
+          <button id="recentExperimentBtn" type="button" class="pill-button" data-question="最近记录">最近记录</button>
           <button id="skillsManageBtn" type="button" class="pill-button">Skills 管理</button>
           <button id="refreshDashboardBtn" type="button" class="pill-button">刷新</button>
           <label class="debug-switch compact">
@@ -68,17 +68,17 @@
     <footer class="composer-wrap">
       <div id="selectedFileChip" class="selected-file-chip hidden"></div>
       <div class="composer">
-        <button id="fileButton" class="composer-icon-btn" type="button" title="上传 CSV 文件" aria-label="上传 CSV 文件">
+        <button id="fileButton" class="composer-icon-btn" type="button" title="上传文件" aria-label="上传文件">
           +
         </button>
         <textarea
           id="messageInput"
           class="composer-input"
-          placeholder="输入问题，或点击 + 上传 CSV 光谱文件"
+          placeholder="输入问题，或点击 + 上传任意文件"
           rows="1"
         ></textarea>
         <button id="sendButton" class="send-btn" type="button">发送</button>
-        <input id="fileInput" type="file" accept=".csv,text/csv" style="display: none" />
+        <input id="fileInput" type="file" accept="*/*" style="display: none" />
       </div>
       <p id="chatStatus" class="chat-status">正在初始化界面...</p>
     </footer>
@@ -89,7 +89,7 @@
     <aside class="skills-panel-drawer" role="dialog" aria-modal="true" aria-labelledby="skillsPanelTitle">
       <div class="skills-panel-header">
         <div>
-          <p class="brand-small brand-small-panel">RamanAgent Skills</p>
+          <p class="brand-small brand-small-panel">Agent Skills</p>
           <h2 id="skillsPanelTitle">当前 Agent 已安装的能力模块</h2>
         </div>
         <button id="closeSkillsPanelBtn" type="button" class="mini-ghost-button">关闭</button>

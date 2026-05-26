@@ -21,7 +21,12 @@ def test_frontend_references_agent_endpoints():
     assert "/api/agent/analyze-file" in api_text
     assert "/api/agent/chat" in api_text
     assert "chatMessages" in index_text
+    assert 'accept="*/*"' in index_text
+    assert "上传文件" in index_text
     assert "professional_analysis" in app_text
     assert "renderUploadedSkillResult" in app_text
+    assert "buildAssistantSourceBadge" in app_text
+    assert "skill-trace-banner" in app_text
     assert "前后叠加对比" in app_text
     assert "结果摘要" in app_text
+    assert "请上传 CSV 格式的光谱文件" not in app_text

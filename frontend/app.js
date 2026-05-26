@@ -3,6 +3,7 @@ import {
   getAgentModels,
   getCurrentModel,
   loadSkills as fetchSkills,
+  deleteSkill as requestDeleteSkill,
   sendAgentChat,
   setActionEnabled as requestSetActionEnabled,
   setSkillEnabled as requestSetSkillEnabled,
@@ -12,7 +13,8 @@ import {
 } from "./js/api.js";
 
 const STORAGE_KEYS = {
-  sessionId: "ramanagent.sessionId",
+  sessionId: "multiskill-agent.sessionId",
+  legacySessionId: "ramanagent.sessionId",
 };
 
 const state = {
@@ -34,7 +36,11 @@ const $ = (id) => document.getElementById(id);
 
 function loadSessionId() {
   try {
-    return localStorage.getItem(STORAGE_KEYS.sessionId) || "";
+    return (
+      localStorage.getItem(STORAGE_KEYS.sessionId)
+      || localStorage.getItem(STORAGE_KEYS.legacySessionId)
+      || ""
+    );
   } catch {
     return "";
   }
@@ -59,8 +65,10 @@ function persistSessionId(sessionId) {
   try {
     if (state.sessionId) {
       localStorage.setItem(STORAGE_KEYS.sessionId, state.sessionId);
+      localStorage.removeItem(STORAGE_KEYS.legacySessionId);
     } else {
       localStorage.removeItem(STORAGE_KEYS.sessionId);
+      localStorage.removeItem(STORAGE_KEYS.legacySessionId);
     }
   } catch {
     // ignore
@@ -133,7 +141,7 @@ function setBusy(isBusy, hint = "正在处理中...") {
   if (chatDebug) {
     chatDebug.disabled = isBusy;
   }
-  setChatStatus(isBusy ? hint : state.sessionId ? `当前会话：${state.sessionId}` : "可以直接提问，或上传 CSV 后发送。");
+  setChatStatus(isBusy ? hint : state.sessionId ? `当前会话：${state.sessionId}` : "可以直接提问，或上传任意文件后发送。");
 }
 
 function appendMessage(role, html, type = "text", meta = buildNowText()) {
@@ -158,13 +166,71 @@ function appendMessage(role, html, type = "text", meta = buildNowText()) {
   return row;
 }
 
+function escapeOrFallback(value, fallback = "") {
+  const text = String(value ?? "").trim();
+  return text || fallback;
+}
+
+function buildAssistantSourceBadge(message = {}, fallback = {}) {
+  if (!message) {
+    return "";
+  }
+  const source = escapeOrFallback(message.source || fallback.source, "");
+  const skillName = escapeOrFallback(message.skill_name || message.analysis?.skill_name, "");
+  const actionName = escapeOrFallback(message.action_name || message.analysis?.action_name, "");
+  const skillMode = escapeOrFallback(message.skill_mode || message.analysis?.skill_mode || fallback.skill_mode, "");
+  const routeInfo = message.route_info || fallback.route_info || {};
+  const route = escapeOrFallback(routeInfo.route, "");
+  const reason = escapeOrFallback(routeInfo.reason, "");
+  const tags = [];
+
+  if (source) {
+    tags.push(`<span class="skill-trace-tag">来源：${escapeHtml(source)}</span>`);
+  }
+  if (skillName) {
+    tags.push(`<span class="skill-trace-tag">Skill：${escapeHtml(skillName)}</span>`);
+  }
+  if (actionName) {
+    tags.push(`<span class="skill-trace-tag">Action：${escapeHtml(actionName)}</span>`);
+  }
+  if (skillMode) {
+    const modeLabel = skillMode === "prompt_only" ? "提示词型" : skillMode === "executable" ? "可执行型" : skillMode;
+    tags.push(`<span class="skill-trace-tag">模式：${escapeHtml(modeLabel)}</span>`);
+  }
+  if (route) {
+    tags.push(`<span class="skill-trace-tag">Route：${escapeHtml(route)}</span>`);
+  }
+  if (reason) {
+    tags.push(`<span class="skill-trace-tag muted">原因：${escapeHtml(reason)}</span>`);
+  }
+
+  if (!tags.length) {
+    if (source === "llm_response") {
+      tags.push('<span class="skill-trace-tag">来源：大模型回复</span>');
+    } else if (source === "fallback") {
+      tags.push('<span class="skill-trace-tag">来源：兜底回复</span>');
+    }
+  }
+
+  if (!tags.length) {
+    return "";
+  }
+
+  return `
+    <div class="skill-trace-banner" data-skill-trace>
+      <span class="skill-trace-title">本次回答使用了</span>
+      <div class="skill-trace-tags">${tags.join("")}</div>
+    </div>
+  `;
+}
+
 function appendFileCard(file) {
   if (!file) {
     return;
   }
   appendMessage(
     "user",
-    `<div class="file-card"><strong>CSV</strong><span>${escapeHtml(file.name)}</span></div>`,
+    `<div class="file-card"><strong>文件</strong><span>${escapeHtml(file.name)}</span></div>`,
     "text",
   );
 }
@@ -195,9 +261,10 @@ function renderWelcomeMessage() {
   appendMessage(
     "system",
     [
-      "<p>欢迎使用聊天式 RamanAgent。</p>",
-      "<p>你可以直接提问，也可以点击左下角的 <strong>+</strong> 上传 CSV 光谱文件，然后继续发送分析请求。</p>",
-      "<p>常见用法：<span class=\"inline-chip\">最近实验</span> <span class=\"inline-chip\">模型列表</span> <span class=\"inline-chip\">Skills 管理</span></p>",
+      "<p>欢迎使用多功能 Agent 工作台。</p>",
+      "<p>你可以直接提问，也可以点击左下角的 <strong>+</strong> 上传任意文件，然后继续发送处理请求。</p>",
+      "<p>当前支持通过 Skills 扩展能力，其中 Raman 光谱处理是一个独立 Skill。</p>",
+      "<p>常见用法：<span class=\"inline-chip\">最近记录</span> <span class=\"inline-chip\">模型列表</span> <span class=\"inline-chip\">Skills 管理</span></p>",
     ].join(""),
     "text",
     state.sessionId ? `已恢复 ${state.sessionId}` : "新会话",
@@ -255,6 +322,21 @@ function renderSkillToggleButton(skill) {
       ${canToggle ? "" : "disabled"}
     >
       ${skill.enabled ? "禁用" : "启用"}
+    </button>
+  `;
+}
+
+function renderSkillDeleteButton(skill) {
+  if (skill.source !== "uploaded") {
+    return "";
+  }
+  return `
+    <button
+      type="button"
+      class="skill-toggle-button small danger"
+      data-delete-skill="${escapeHtml(skill.name || "")}"
+    >
+      删除
     </button>
   `;
 }
@@ -326,7 +408,10 @@ function renderSkillCard(skill) {
             <p class="skill-technical-name">${escapeHtml(skill.name || "")}</p>
           </div>
         </div>
-        ${renderSkillToggleButton(skill)}
+        <div class="skill-card-toolbar">
+          ${renderSkillToggleButton(skill)}
+          ${renderSkillDeleteButton(skill)}
+        </div>
       </div>
       <p class="skill-description">${escapeHtml(skill.description || "暂无描述")}</p>
       <div class="skill-tags">
@@ -390,6 +475,11 @@ function renderSkillsPanel(payload) {
   body.querySelectorAll("[data-toggle-skill-enabled]").forEach((button) => {
     button.addEventListener("click", () => {
       toggleSkillEnabled(button.dataset.toggleSkillEnabled || "", button.dataset.nextEnabled === "true");
+    });
+  });
+  body.querySelectorAll("[data-delete-skill]").forEach((button) => {
+    button.addEventListener("click", () => {
+      deleteSkillItem(button.dataset.deleteSkill || "");
     });
   });
   body.querySelectorAll("[data-toggle-action-enabled]").forEach((button) => {
@@ -484,6 +574,31 @@ async function toggleActionEnabled(skillName, actionName, enabled) {
   }
 }
 
+async function deleteSkillItem(skillName) {
+  if (!skillName) {
+    return;
+  }
+  const confirmed = window.confirm(
+    `确定要删除 Skill「${skillName}」吗？删除后会清理上传包、解压目录和记录，并且无法恢复。`,
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    const response = await requestDeleteSkill(skillName);
+    if (!response.success) {
+      throw new Error(response.error_message || "删除 Skill 失败");
+    }
+    state.expandedSkillNames.delete(skillName);
+    window.alert(response.message || "Skill 已删除");
+    await refreshSkillsPanel();
+  } catch (error) {
+    console.error("删除 Skill 失败：", error);
+    window.alert(`删除 Skill 失败：${error.message || "未知错误"}`);
+  }
+}
+
 function renderSelectedFileChip(file) {
   const chip = $("selectedFileChip");
   if (!chip) {
@@ -519,15 +634,6 @@ function renderSelectedFileChip(file) {
 function handleFileSelect(event) {
   const file = event.target.files && event.target.files[0];
   if (!file) {
-    return;
-  }
-
-  const lowerName = file.name.toLowerCase();
-  if (!lowerName.endsWith(".csv")) {
-    window.alert("请上传 CSV 格式的光谱文件");
-    event.target.value = "";
-    state.selectedFile = null;
-    renderSelectedFileChip(null);
     return;
   }
 
@@ -844,13 +950,34 @@ function renderPredictionResult(message) {
 function renderUploadedSkillResult(message) {
   const analysis = message?.analysis || {};
   const details = analysis.details || {};
-  const replyText = details.reply_text || message?.content || analysis.summary || "上传 Skill 已执行。";
+  const summary = analysis.summary || message?.content || details.analysis_summary || "文件分析完成。";
+  const keyPoints = Array.isArray(details.key_points) ? details.key_points : [];
+  const warnings = Array.isArray(details.warnings) ? details.warnings : [];
   return `
     <div class="analysis-card">
       <div class="analysis-summary">
-        <p><strong>上传 Skill 执行结果</strong></p>
+        <p><strong>文件分析</strong></p>
+        <p>${escapeHtml(summary)}</p>
       </div>
-      <pre class="skill-result-block">${escapeHtml(replyText)}</pre>
+      ${
+        keyPoints.length
+          ? `
+            <div class="detail-list">
+              ${keyPoints.map((item) => `<div class="detail-item"><span>要点</span><strong>${escapeHtml(item)}</strong></div>`).join("")}
+            </div>
+          `
+          : ""
+      }
+      ${
+        warnings.length
+          ? `
+            <div class="analysis-summary soft">
+              <p><strong>提示</strong></p>
+              <p>${escapeHtml(warnings.join("；"))}</p>
+            </div>
+          `
+          : ""
+      }
     </div>
   `;
 }
@@ -879,7 +1006,7 @@ function renderReportResult(message) {
   return `
     <div class="analysis-card">
       <div class="analysis-summary">
-        <p><strong>实验报告生成结果</strong></p>
+        <p><strong>报告生成结果</strong></p>
         <p>${escapeHtml(message?.content || analysis.summary || "报告已生成。")}</p>
       </div>
       <div class="detail-list">
@@ -908,34 +1035,35 @@ function renderAssistantResponse(payload) {
   messages.forEach((message) => {
     if (message.type === "analysis") {
       const kind = message.result_kind || message.analysis?.result_kind || "generic";
+      const traceBanner = buildAssistantSourceBadge(message, payload);
       if (kind === "preprocessing") {
-        appendMessage("assistant", renderPreprocessingResult(message), "analysis");
+        appendMessage("assistant", `${traceBanner}${renderPreprocessingResult(message)}`, "analysis");
         return;
       }
       if (kind === "prediction") {
-        appendMessage("assistant", renderPredictionResult(message), "analysis");
+        appendMessage("assistant", `${traceBanner}${renderPredictionResult(message)}`, "analysis");
         return;
       }
       if (kind === "model_status") {
-        appendMessage("assistant", renderModelStatusResult(message), "analysis");
+        appendMessage("assistant", `${traceBanner}${renderModelStatusResult(message)}`, "analysis");
         return;
       }
       if (kind === "report") {
-        appendMessage("assistant", renderReportResult(message), "analysis");
+        appendMessage("assistant", `${traceBanner}${renderReportResult(message)}`, "analysis");
         return;
       }
       if (kind === "uploaded_skill") {
-        appendMessage("assistant", renderUploadedSkillResult(message), "analysis");
+        appendMessage("assistant", `${traceBanner}${renderUploadedSkillResult(message)}`, "analysis");
         return;
       }
-      appendMessage("assistant", renderGenericAnalysisResult(message), "analysis");
+      appendMessage("assistant", `${traceBanner}${renderGenericAnalysisResult(message)}`, "analysis");
       return;
     }
     if (message.type === "error") {
-      appendMessage("assistant", `<p class="error-message">${escapeHtml(message.content || "分析失败。")}</p>`, "error");
+      appendMessage("assistant", `${buildAssistantSourceBadge(message, payload)}<p class="error-message">${escapeHtml(message.content || "分析失败。")}</p>`, "error");
       return;
     }
-    appendMessage("assistant", `<p>${escapeHtml(message.content || "")}</p>`, "text");
+    appendMessage("assistant", `${buildAssistantSourceBadge(message, payload)}<p>${escapeHtml(message.content || "")}</p>`, "text");
   });
 }
 
@@ -1074,7 +1202,7 @@ function bindPageEvents() {
     }
   });
   $("closeModelListBtn")?.addEventListener("click", closeModelList);
-  $("recentExperimentBtn")?.addEventListener("click", () => sendChatMessage("最近实验"));
+  $("recentExperimentBtn")?.addEventListener("click", () => sendChatMessage("最近记录"));
   $("refreshDashboardBtn")?.addEventListener("click", refreshDashboard);
 
   document.addEventListener("click", (event) => {
@@ -1211,11 +1339,11 @@ async function sendChatMessage(presetMessage = "") {
   const timeoutMs = getChatRequestTimeout({ hasFile: Boolean(selectedFile), message });
 
   if (!message && !selectedFile) {
-    setChatStatus("请输入消息，或者先选择一个 CSV 文件。");
+    setChatStatus("请输入消息，或者先选择一个文件。");
     return;
   }
 
-  appendMessage("user", `<p>${escapeHtml(message || "请分析这个 CSV 光谱文件")}</p>`, "text");
+  appendMessage("user", `<p>${escapeHtml(message || "请分析这个文件")}</p>`, "text");
   if (selectedFile) {
     appendFileCard(selectedFile);
   }
@@ -1225,8 +1353,8 @@ async function sendChatMessage(presetMessage = "") {
     autoResizeTextarea();
   }
 
-  setBusy(true, selectedFile ? "正在上传 CSV 并分析..." : "正在思考...");
-  renderTypingMessage(selectedFile ? "正在进行光谱分析，可能需要几十秒，请稍候..." : "正在处理，请稍候...");
+  setBusy(true, selectedFile ? "正在上传文件并分析..." : "正在思考...");
+  renderTypingMessage(selectedFile ? "正在分析文件内容，可能需要几十秒，请稍候..." : "正在处理，请稍候...");
 
   try {
     const response = await sendAgentChat({
@@ -1245,11 +1373,11 @@ async function sendChatMessage(presetMessage = "") {
     }
 
     if (!response.success) {
-      console.error("发送消息失败：", response.error_message);
-      const errorText = String(response.error_message || "未知错误");
+      console.error("发送消息失败：", response.error_message || "处理失败，请检查后端日志");
+      const errorText = String(response.error_message || "处理失败，请检查后端日志");
       const friendlyMessage = errorText.includes("请求超时")
-        ? `发送失败：${escapeHtml(errorText)}。当前任务可能仍在后台处理中，你可以稍后重试，已选择的文件会保留。`
-        : `发送失败：${escapeHtml(errorText)}`;
+        ? `处理失败：${escapeHtml(errorText)}。当前任务可能仍在后台处理中，你可以稍后重试，已选择的文件会保留。`
+        : `处理失败：${escapeHtml(errorText)}`;
       appendMessage("assistant", `<p class="error-message">${friendlyMessage}</p>`, "error");
       return;
     }
@@ -1289,7 +1417,7 @@ function initApp() {
   restoreSessionIfNeeded();
   renderWelcomeMessage();
   autoResizeTextarea();
-  setChatStatus(state.sessionId ? `当前会话：${state.sessionId}` : "可以直接提问，或上传 CSV 后发送。");
+  setChatStatus(state.sessionId ? `当前会话：${state.sessionId}` : "可以直接提问，或上传任意文件后发送。");
   loadModelsSafely();
   loadStatusSafely();
   loadSkillsSafely();

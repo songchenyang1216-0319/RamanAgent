@@ -27,7 +27,9 @@ def test_agent_service_and_router():
     assert "available_tools" not in response
     assert "tool_result" not in response
     assert "data" in response
-    assert response["data"]["model_version"] == "methanol_v1"
+    assert response["intent"] == "system_info_query"
+    assert response["data"]["query_type"] == "current_model"
+    assert response["data"]["current_model"]["model_version"] == "methanol_v1"
     assert "next_action" in response
 
     greeting = service.chat("你好")
@@ -48,8 +50,9 @@ def test_agent_service_llm_intent_fallback(monkeypatch):
 
     def fake_classify(self, message: str) -> dict:
         mapping = {
-            "你现在背后跑的是什么模型？": {"intent": "model_info", "confidence": 0.91, "reason": "询问当前模型", "slots": {}},
-            "刚才分析用的是哪套权重？": {"intent": "model_info", "confidence": 0.88, "reason": "询问当前权重", "slots": {}},
+            "你现在背后跑的是什么模型？": {"intent": "model_info", "confidence": 0.91, "reason": "询问当前模型", "slots": {"system_info_target": "current_model"}},
+            "刚才分析用的是哪套权重？": {"intent": "model_info", "confidence": 0.88, "reason": "询问当前权重", "slots": {"system_info_target": "current_model"}},
+            "你现在用的是哪个平台的大模型？": {"intent": "system_info_query", "confidence": 0.93, "reason": "询问平台来源", "slots": {"system_info_target": "provider"}},
             "帮我看看最近一次实验结果": {"intent": "history_query", "confidence": 0.9, "reason": "查询历史", "slots": {}},
             "和之前的样品比一下": {"intent": "compare_history", "confidence": 0.86, "reason": "想和历史样品对比", "slots": {}},
             "这个峰大概是什么物质的？": {"intent": "peak_analysis", "confidence": 0.87, "reason": "询问峰解释", "slots": {}},
@@ -60,12 +63,20 @@ def test_agent_service_llm_intent_fallback(monkeypatch):
 
     model_response = service.chat("你现在背后跑的是什么模型？")
     assert model_response["category"] == "tool"
-    assert model_response["intent"] == "get_current_model"
-    assert model_response["data"]["model_version"] == "methanol_v1"
+    assert model_response["intent"] == "system_info_query"
+    assert model_response["data"]["query_type"] == "current_model"
+    assert model_response["data"]["current_model"]["model_version"] == "methanol_v1"
 
     weight_response = service.chat("刚才分析用的是哪套权重？")
     assert weight_response["category"] == "tool"
-    assert weight_response["intent"] == "get_current_model"
+    assert weight_response["intent"] == "system_info_query"
+    assert weight_response["data"]["query_type"] == "current_model"
+
+    provider_response = service.chat("你现在用的是哪个平台的大模型？")
+    assert provider_response["category"] == "tool"
+    assert provider_response["intent"] == "system_info_query"
+    assert provider_response["data"]["query_type"] == "provider"
+    assert "provider_info" in provider_response["data"]
 
     history_response = service.chat("帮我看看最近一次实验结果")
     assert history_response["category"] == "tool"

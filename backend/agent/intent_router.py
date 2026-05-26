@@ -45,16 +45,43 @@ def detect_intent(message: str) -> dict:
         return {"intent": "help", "category": "help", "confidence": 1.0, "params": {}}
 
     if any(keyword in text for keyword in ("模型文件", "模型是否齐全", "检查模型", "模型文件正常吗")) or "artifacts" in lowered:
-        return {"intent": "check_artifacts", "category": "tool", "confidence": 0.98, "params": {}}
+        return {"intent": "system_info_query", "category": "tool", "confidence": 0.98, "params": {"query_type": "model_artifacts"}}
 
     if any(keyword in text for keyword in ("当前模型", "模型版本", "用的是哪个模型", "当前用的模型是什么")):
-        return {"intent": "get_current_model", "category": "tool", "confidence": 0.98, "params": {}}
+        return {"intent": "system_info_query", "category": "tool", "confidence": 0.98, "params": {"query_type": "current_model"}}
+
+    if any(
+        keyword in text
+        for keyword in (
+            "哪个平台的大模型",
+            "大模型平台",
+            "模型平台",
+            "平台的大模型",
+            "硅基流动",
+            "siliconflow",
+            "是不是硅基流动",
+            "还是其他平台",
+            "你现在用的是什么平台",
+            "你用的是哪个平台",
+            "大模型是哪里的",
+            "大模型来源",
+            "供应商",
+            "provider",
+        )
+    ):
+        return {"intent": "system_info_query", "category": "tool", "confidence": 0.98, "params": {"query_type": "provider"}}
 
     if any(keyword in text for keyword in ("所有模型", "有哪些模型版本", "列出模型版本", "模型列表")):
-        return {"intent": "list_model_versions", "category": "tool", "confidence": 0.96, "params": {}}
+        return {"intent": "system_info_query", "category": "tool", "confidence": 0.96, "params": {"query_type": "model_versions"}}
 
     if any(keyword in text for keyword in ("检查当前模型", "模型文件齐全吗", "模型能不能用")):
-        return {"intent": "check_current_model", "category": "tool", "confidence": 0.98, "params": {}}
+        return {"intent": "system_info_query", "category": "tool", "confidence": 0.98, "params": {"query_type": "model_artifacts"}}
+
+    if any(keyword in text for keyword in ("skills 状态", "skill 状态", "技能状态", "当前 skills", "当前 skills 状态", "有哪些 skills", "skill 列表", "技能列表")):
+        return {"intent": "system_info_query", "category": "tool", "confidence": 0.96, "params": {"query_type": "skills"}}
+
+    if any(keyword in text for keyword in ("会话 id", "session id", "当前会话", "会话状态", "当前 session")):
+        return {"intent": "system_info_query", "category": "tool", "confidence": 0.94, "params": {"query_type": "session"}}
 
     if any(keyword in text for keyword in ("实验详情", "样品详情")):
         history_id = _extract_history_id(text)

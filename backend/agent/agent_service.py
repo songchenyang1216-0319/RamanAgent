@@ -1,24 +1,27 @@
-"""RamanAgent 工具调用服务。"""
+"""多功能 Agent 工具调用服务。"""
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from backend.agent.agent_planner import AgentPlan, AgentPlanner
 from backend.agent.llm_intent_classifier import LLMIntentClassifier
 from backend.agent.intent_router import detect_intent
-from backend.agent.session_store import get_last_analysis, update_session
+from backend.agent.session_store import get_last_analysis, get_session, update_session
 from backend.agent.tool_registry import get_tool_spec, list_tool_specs
 from backend.agent.prompts.general_chat_prompt import build_general_chat_local_reply
 from backend.services.history_service import list_analysis_history
 from backend.services.llm_service import LLMService
+from backend.skills.registry import execute_skill, list_skills
+from raman_core.methanol.config import PROJECT_ROOT
 
 
 logger = logging.getLogger(__name__)
 
 
-class RamanAgentService:
-    """基于规则路由的轻量级 Agent 服务。"""
+class MultiSkillAgentService:
+    """基于规则路由的轻量级多功能 Agent 服务。"""
 
     def __init__(self) -> None:
         self._llm_intent_classifier: LLMIntentClassifier | None = None
@@ -49,6 +52,138 @@ class RamanAgentService:
             return None
         data = response.get("data", {}) or {}
         return data.get("model_version")
+
+    def _llm_provider_info(self) -> dict:
+        """返回当前通用大模型平台信息。"""
+        return LLMService().get_provider_info()
+
+    def _infer_system_info_target(self, message: str, params: dict | None = None) -> str:
+        """统一识别系统信息问题的具体目标，避免每个问法都单独加路由。"""
+        payload = params or {}
+        slot_target = str(
+            payload.get("query_type")
+            or payload.get("system_info_target")
+            or payload.get("target")
+            or ""
+        ).strip()
+        if slot_target in {"provider", "current_model", "model_artifacts", "model_versions", "skills", "session", "overview"}:
+            return slot_target
+
+        text = (message or "").strip()
+        lowered = text.lower()
+
+        if any(keyword in text for keyword in ("硅基流动", "平台", "provider", "供应商", "来源")) or "siliconflow" in lowered:
+            return "provider"
+        if any(keyword in text for keyword in ("模型文件", "检查模型", "工件")) or "artifact" in lowered:
+            return "model_artifacts"
+        if any(keyword in text for keyword in ("模型列表", "所有模型", "有哪些模型版本", "列出模型版本")):
+            return "model_versions"
+        if any(keyword in text for keyword in ("skill", "skills", "技能")):
+            return "skills"
+        if any(keyword in text for keyword in ("会话", "session")):
+            return "session"
+        if any(keyword in text for keyword in ("当前模型", "模型版本", "用的是哪个模型", "哪套权重")):
+            return "current_model"
+        return "overview"
+
+    def _build_system_info_response(
+        self,
+        message: str,
+        params: dict | None = None,
+        session_id: str | None = None,
+        debug: bool = False,
+    ) -> dict:
+        """统一回答平台、模型、文件、Skills、会话等系统信息问题。"""
+        query_type = self._infer_system_info_target(message, params=params)
+        provider_info = self._llm_provider_info()
+        model_result = self.run_tool("get_current_model", {})
+        model_data = model_result.get("data", {}) if model_result.get("success") else {}
+        artifact_result = self.run_tool("check_current_model", {})
+        artifact_data = artifact_result.get("data", {}) if artifact_result.get("success") else {}
+        model_list_result = self.run_tool("list_model_versions", {})
+        model_versions = model_list_result.get("data", []) if model_list_result.get("success") else []
+        skills_result = list_skills(include_actions=False)
+        session_data = get_session(session_id) if session_id else None
+
+        payload = {
+            "query_type": query_type,
+            "provider_info": provider_info,
+            "current_model": model_data,
+            "model_artifacts": artifact_data,
+            "model_versions": model_versions,
+            "skills": {
+                "total": skills_result.get("total", 0),
+                "enabled_count": skills_result.get("enabled_count", 0),
+                "available_count": skills_result.get("available_count", 0),
+                "items": skills_result.get("skills", []),
+            },
+            "session": {
+                "session_id": session_id,
+                "exists": bool(session_data),
+                "message_count": len((session_data or {}).get("messages", []) or []),
+                "updated_at": (session_data or {}).get("updated_at"),
+                "has_last_analysis": bool((session_data or {}).get("last_analysis")),
+            },
+        }
+
+        current_model_version = model_data.get("model_version", "未知版本")
+        provider_name = provider_info.get("provider_name", "未配置平台大模型")
+        provider_model = provider_info.get("model", "未知模型")
+
+        if query_type == "provider":
+            if provider_info.get("configured"):
+                reply = f"当前通用大模型平台是 {provider_name}，接口地址是 {provider_info.get('base_url') or '未提供'}，使用的模型是 {provider_model}。"
+            else:
+                reply = "当前没有配置可调用的通用平台大模型。业务模型版本可以是 methanol_v1，但这和通用大模型平台不是一回事。"
+            next_action = "如果你愿意，我也可以继续把业务模型版本、模型文件状态和 Skills 状态一起列给你。"
+        elif query_type == "current_model":
+            reply = f"当前业务模型版本是 {current_model_version}。如果你问的是通用大模型平台，那么当前平台信息是 {provider_name}。"
+            next_action = "如果你想继续确认模型文件是否齐全，或者看全部模型版本，我可以接着查。"
+        elif query_type == "model_artifacts":
+            missing = artifact_data.get("missing_files", []) or []
+            reply = "当前模型文件检查完成，模型可用。" if not missing else f"当前模型文件检查完成，但还有 {len(missing)} 个缺失文件。"
+            next_action = "如果你想，我也可以继续告诉你当前模型版本和平台来源。"
+        elif query_type == "model_versions":
+            reply = f"当前已注册 {len(model_versions)} 个模型版本，当前使用的是 {current_model_version}。"
+            next_action = "如果你想切换或检查其中某个模型文件，我可以继续帮你看。"
+        elif query_type == "skills":
+            reply = (
+                f"当前共注册 {skills_result.get('total', 0)} 个 Skills，"
+                f"其中已启用 {skills_result.get('enabled_count', 0)} 个，可用 {skills_result.get('available_count', 0)} 个。"
+            )
+            next_action = "如果你愿意，我也可以继续列出上传 Skill 和内置 Skill 的区别。"
+        elif query_type == "session":
+            if session_id:
+                reply = (
+                    f"当前会话 ID 是 {session_id}，"
+                    f"本轮已记录 {payload['session']['message_count']} 条消息，"
+                    f"{'已有最近一次分析结果。' if payload['session']['has_last_analysis'] else '暂时还没有最近一次分析结果。'}"
+                )
+            else:
+                reply = "当前这次请求还没有关联会话 ID，所以我暂时拿不到会话级状态。"
+            next_action = "如果你想，我也可以继续给你看这轮会话的最近分析结果或平台配置。"
+        else:
+            reply = (
+                f"当前业务模型版本是 {current_model_version}，"
+                f"通用大模型平台是 {provider_name}，"
+                f"已注册 {len(model_versions)} 个模型版本，"
+                f"当前 Skills 总数是 {skills_result.get('total', 0)} 个。"
+            )
+            next_action = "如果你要，我可以继续把其中某一项单独展开，比如平台来源、模型文件状态或 Skills 列表。"
+
+        return self._build_response(
+            intent="system_info_query",
+            category="tool",
+            reply=reply,
+            next_action=next_action,
+            tool_used="system_info_query",
+            tool_result=None,
+            debug=debug,
+            success=True,
+            error_message=None,
+            data=payload,
+            session_id=session_id,
+        )
 
     def _simplify_history_item(self, item: dict) -> dict:
         """压缩历史/实验记录条目，避免聊天响应过大。"""
@@ -83,6 +218,27 @@ class RamanAgentService:
             return "last_prediction"
         if ("结果" in text or "样品" in text) and self._contains_any(text, ("靠谱吗", "怎么样", "如何")):
             return "last_analysis_explanation"
+        if lowered in {
+            "确认",
+            "继续",
+            "继续分析",
+            "继续处理",
+            "接着分析",
+            "接着处理",
+            "展开",
+            "展开讲讲",
+            "详细说说",
+            "再详细一点",
+            "按这个做",
+            "按这个来",
+            "基于这个继续",
+        }:
+            return "last_analysis_followup"
+        if self._contains_any(text, ("刚才", "这个文件", "这个结果", "上一个文件", "上一轮")) and self._contains_any(
+            text,
+            ("继续", "展开", "详细", "解释", "分析", "处理", "确认", "提炼", "总结"),
+        ):
+            return "last_analysis_followup"
         if lowered in {"生成报告", "出报告"}:
             return "report_generation"
         return None
@@ -92,12 +248,170 @@ class RamanAgentService:
         return self._build_response(
             intent="context_missing_analysis",
             category="general_chat",
-            reply="我还没有看到你本轮会话中的分析结果，你可以先上传一个 CSV 光谱文件。",
-            next_action="你可以直接使用 /api/agent/analyze-file 上传 Raman CSV 文件，我会把结果记在这轮会话里。",
+            reply="我这轮还没有记到可继续引用的分析结果，你可以先上传一个文件或先完成一次分析。",
+            next_action="分析完成后，你可以直接继续说“确认”“继续”“展开讲讲”“给我总结一下”，我会接着刚才那次结果往下走。",
             tool_used=None,
             tool_result=None,
             debug=debug,
             data=None,
+            session_id=session_id,
+        )
+
+    def _is_raman_analysis(self, last_analysis: dict) -> bool:
+        """判断最近一次分析是否属于 Raman 预测链路。"""
+        skill_name = str(last_analysis.get("skill_name") or "").strip()
+        if skill_name == "raman_spectroscopy_skill":
+            return True
+        result = dict(last_analysis.get("result") or {})
+        return result.get("final_prediction") is not None
+
+    def _extract_last_analysis_summary(self, last_analysis: dict) -> tuple[str, dict, list[str]]:
+        """提取最近一次分析的摘要、结构化分析和警告信息。"""
+        analysis = dict(last_analysis.get("analysis") or {})
+        summary = str(
+            last_analysis.get("llm_explanation")
+            or last_analysis.get("reply")
+            or analysis.get("summary")
+            or ""
+        ).strip()
+        details = analysis.get("details") if isinstance(analysis.get("details"), dict) else {}
+        warnings = list(
+            last_analysis.get("warnings")
+            or details.get("warnings")
+            or last_analysis.get("data", {}).get("warnings")
+            or []
+        )
+        return summary, analysis, warnings
+
+    def _build_generic_last_analysis_explanation_response(
+        self,
+        last_analysis: dict,
+        session_id: str | None,
+        debug: bool = False,
+    ) -> dict:
+        """基于最近一次非 Raman 分析结果给出解释。"""
+        summary, analysis, warnings = self._extract_last_analysis_summary(last_analysis)
+        skill_name = str(last_analysis.get("skill_name") or "最近一次 Skill").strip()
+        saved_file = str(last_analysis.get("saved_file") or "最近一次文件").strip()
+        details = analysis.get("details") if isinstance(analysis.get("details"), dict) else {}
+        key_points = list(details.get("key_points") or details.get("highlights") or [])
+
+        segments = []
+        if summary:
+            segments.append(summary)
+        else:
+            segments.append(f"我已经记住了刚才通过 {skill_name} 得到的分析结果。")
+        if key_points:
+            preview = "；".join(str(item) for item in key_points[:3] if item)
+            if preview:
+                segments.append(f"当前记住的重点有：{preview}。")
+        if warnings:
+            warning_preview = "；".join(str(item) for item in warnings[:2] if item)
+            if warning_preview:
+                segments.append(f"另外有提示：{warning_preview}。")
+        reply = " ".join(part for part in segments if part).strip()
+        if not reply:
+            reply = f"我已经记住了刚才文件 `{saved_file}` 的分析结果，你可以继续让我基于这份结果展开。"
+
+        return self._build_response(
+            intent="last_analysis_explanation",
+            category="tool",
+            reply=reply,
+            next_action="如果你愿意，可以继续说“提炼成要点”“按这个继续处理”“解释敏感字段风险”，我会沿用刚才那次结果。",
+            tool_used="session_last_analysis",
+            tool_result=None,
+            debug=debug,
+            data={
+                "skill_name": last_analysis.get("skill_name"),
+                "saved_file": last_analysis.get("saved_file"),
+                "summary": summary,
+                "warnings": warnings,
+                "analysis": analysis,
+            },
+            session_id=session_id,
+        )
+
+    def _build_followup_context_message(self, last_analysis: dict, message: str) -> str:
+        """把当前补充问题与最近一次分析上下文拼成可复用提示。"""
+        previous_request = str(last_analysis.get("message") or "").strip()
+        previous_reply = str(last_analysis.get("llm_explanation") or last_analysis.get("reply") or "").strip()
+        parts = ["你正在继续处理同一个文件。"]
+        if previous_request:
+            parts.append(f"上一轮用户请求：{previous_request}")
+        if previous_reply:
+            parts.append(f"上一轮分析结论：{previous_reply}")
+        parts.append(f"当前补充请求：{message}")
+        return "\n".join(parts)
+
+    def _continue_with_last_skill(
+        self,
+        last_analysis: dict,
+        message: str,
+        session_id: str | None,
+        debug: bool = False,
+    ) -> dict:
+        """复用最近一次 Skill 与文件，继续处理本轮补充请求。"""
+        skill_name = str(last_analysis.get("skill_name") or "").strip()
+        action_name = str(last_analysis.get("action_name") or "").strip()
+        saved_file = str(last_analysis.get("saved_file") or "").strip()
+        if not skill_name or not action_name or not saved_file:
+            return self._build_generic_last_analysis_explanation_response(last_analysis, session_id, debug=debug)
+
+        file_path = Path(saved_file)
+        if not file_path.is_absolute():
+            file_path = PROJECT_ROOT / file_path
+        if not file_path.exists():
+            return self._build_generic_last_analysis_explanation_response(last_analysis, session_id, debug=debug)
+
+        task_type = str(last_analysis.get("data", {}).get("task_type") or "extract").strip() or "extract"
+        contextual_message = self._build_followup_context_message(last_analysis, message)
+        skill_result = execute_skill(
+            skill_name,
+            action_name=action_name,
+            file_path=str(file_path),
+            task_type=task_type,
+            session_id=session_id,
+            message=contextual_message,
+            original_message=message,
+        )
+        reply = str(skill_result.data.get("reply_text") or skill_result.summary or "").strip()
+        if not reply:
+            reply = "我已经接着刚才那个文件继续处理了。"
+        if not skill_result.success:
+            summary, analysis, warnings = self._extract_last_analysis_summary(last_analysis)
+            fallback_parts = [reply or "我记住了刚才的结果，但这次继续处理没有成功。"]
+            if summary:
+                fallback_parts.append(f"最近一次结论是：{summary}")
+            if warnings:
+                fallback_parts.append(f"提示：{'；'.join(str(item) for item in warnings[:2] if item)}")
+            reply = " ".join(part for part in fallback_parts if part).strip()
+
+        updated_last_analysis = dict(last_analysis)
+        updated_last_analysis["message"] = message
+        updated_last_analysis["reply"] = reply
+        updated_last_analysis["llm_explanation"] = reply
+        updated_last_analysis["data"] = dict(skill_result.data or {})
+        if session_id:
+            update_session(session_id, "last_analysis", updated_last_analysis)
+
+        return self._build_response(
+            intent="last_analysis_followup",
+            category="tool",
+            reply=reply,
+            next_action="如果还要继续，可以直接在这份结果上补一句你的下一步要求，我会沿用同一份上下文继续处理。",
+            tool_used=action_name,
+            tool_result=None,
+            debug=debug,
+            success=bool(skill_result.success),
+            error_message=None if skill_result.success else reply,
+            data={
+                "skill_name": skill_name,
+                "action_name": action_name,
+                "saved_file": saved_file,
+                "continued": True,
+                "task_type": task_type,
+                "result": dict(skill_result.data or {}),
+            },
             session_id=session_id,
         )
 
@@ -128,6 +442,9 @@ class RamanAgentService:
 
     def _build_last_analysis_explanation_response(self, last_analysis: dict, session_id: str | None, debug: bool = False) -> dict:
         """基于最近一次分析结果回答结果解释。"""
+        if not self._is_raman_analysis(last_analysis):
+            return self._build_generic_last_analysis_explanation_response(last_analysis, session_id, debug=debug)
+
         explanation = str(last_analysis.get("llm_explanation") or "").strip()
         if not explanation:
             explain_result = self.run_tool(
@@ -158,6 +475,22 @@ class RamanAgentService:
 
     def _build_context_report_response(self, last_analysis: dict, session_id: str | None, debug: bool = False) -> dict:
         """基于最近一次分析结果生成或返回报告。"""
+        if not self._is_raman_analysis(last_analysis):
+            return self._build_response(
+                intent="generate_report",
+                category="tool",
+                reply="我已经记住了刚才那次文件分析结果，但这类结果当前没有单独的报告生成动作。",
+                next_action="你可以继续让我基于刚才的结果做总结、提炼要点，或者继续处理同一个文件。",
+                tool_used="session_last_analysis",
+                tool_result=None,
+                debug=debug,
+                data={
+                    "skill_name": last_analysis.get("skill_name"),
+                    "saved_file": last_analysis.get("saved_file"),
+                },
+                session_id=session_id,
+            )
+
         report = last_analysis.get("report")
         if not report:
             report_result = self.run_tool(
@@ -210,6 +543,24 @@ class RamanAgentService:
 
     def _build_context_compare_response(self, last_analysis: dict, session_id: str | None, debug: bool = False) -> dict:
         """基于最近一次分析结果做历史相似样品对比。"""
+        if not self._is_raman_analysis(last_analysis):
+            return self._build_response(
+                intent="find_similar_history",
+                category="tool",
+                reply="最近一次结果是通用文件分析，不适合直接做 Raman 历史样品相似度对比。",
+                next_action="如果你要继续，我可以基于刚才那份文件结果继续总结、解释，或者换一份 Raman CSV 来做历史对比。",
+                tool_used="session_last_analysis",
+                tool_result=None,
+                debug=debug,
+                success=False,
+                error_message="最近一次结果不是 Raman 预测结果。",
+                data={
+                    "skill_name": last_analysis.get("skill_name"),
+                    "saved_file": last_analysis.get("saved_file"),
+                },
+                session_id=session_id,
+            )
+
         compare_result = self.run_tool(
             "find_similar_history",
             {
@@ -251,6 +602,8 @@ class RamanAgentService:
             return self._build_last_prediction_response(last_analysis, session_id, debug=debug)
         if context_type == "last_analysis_explanation":
             return self._build_last_analysis_explanation_response(last_analysis, session_id, debug=debug)
+        if context_type == "last_analysis_followup":
+            return self._continue_with_last_skill(last_analysis, message, session_id, debug=debug)
         if context_type == "report_generation":
             return self._build_context_report_response(last_analysis, session_id, debug=debug)
         if context_type == "compare_history":
@@ -671,10 +1024,21 @@ class RamanAgentService:
         slots = llm_result.get("slots", {}) or {}
         intent = llm_result.get("intent", "unknown")
 
-        if intent == "model_info":
-            if any(keyword in text for keyword in ("模型文件", "工件")) or "artifact" in lowered:
-                return {"intent": "check_current_model", "category": "tool", "confidence": llm_result.get("confidence", 0.0), "params": {}}
-            return {"intent": "get_current_model", "category": "tool", "confidence": llm_result.get("confidence", 0.0), "params": {}}
+        if intent in {"model_info", "system_info_query"}:
+            query_type = self._infer_system_info_target(
+                message,
+                params={
+                    "system_info_target": slots.get("system_info_target"),
+                    "query_type": slots.get("query_type"),
+                    "target": slots.get("target"),
+                },
+            )
+            return {
+                "intent": "system_info_query",
+                "category": "tool",
+                "confidence": llm_result.get("confidence", 0.0),
+                "params": {"query_type": query_type},
+            }
 
         if intent == "history_query":
             return {
@@ -732,7 +1096,10 @@ class RamanAgentService:
 
     def _build_general_chat_response(self, message: str, intent_info: dict, debug: bool = False, session_id: str | None = None) -> dict:
         """处理普通对话、寒暄和轻量问答。"""
-        system_context = {"current_model_version": self._current_model_version()}
+        system_context = {
+            "current_model_version": self._current_model_version(),
+            "llm_provider_info": self._llm_provider_info(),
+        }
         intent = intent_info.get("intent", "general_chat")
         category = intent_info.get("category", "general_chat")
         local_reply = build_general_chat_local_reply(message, system_context=system_context, intent=intent)
@@ -769,7 +1136,10 @@ class RamanAgentService:
 
     def general_chat(self, message: str, context: dict | None = None) -> dict:
         """处理普通对话、知识问答和建议类问题。"""
-        system_context = {"current_model_version": self._current_model_version()}
+        system_context = {
+            "current_model_version": self._current_model_version(),
+            "llm_provider_info": self._llm_provider_info(),
+        }
         if context:
             system_context.update(context)
         return LLMService().generate_general_reply(message, system_context=system_context)
@@ -832,6 +1202,12 @@ class RamanAgentService:
             if category == "builtin":
                 response = self._build_builtin_response(intent, debug=debug)
                 if session_id:
+                    response["session_id"] = session_id
+                return response
+
+            if intent in {"system_info_query", "get_llm_provider"}:
+                response = self._build_system_info_response(message, params=params, session_id=session_id, debug=debug)
+                if session_id and "session_id" not in response:
                     response["session_id"] = session_id
                 return response
 
@@ -1027,3 +1403,7 @@ class RamanAgentService:
                 data=None,
                 session_id=session_id,
             )
+
+
+# 兼容旧导入路径，避免一次性改名影响现有模块。
+RamanAgentService = MultiSkillAgentService

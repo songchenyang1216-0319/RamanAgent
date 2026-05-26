@@ -1,4 +1,4 @@
-"""RamanAgent 通用对话提示词。"""
+"""通用 Agent 对话提示词。"""
 
 from __future__ import annotations
 
@@ -55,9 +55,9 @@ def build_general_chat_local_reply(message: str, system_context: dict | None = N
         return _pick_variant(
             message,
             (
-                "你好，我是 RamanAgent。除了拉曼光谱和甲醇预测，我也可以陪你聊点基础问题；如果你愿意，我们也能直接开始查模型或分析 CSV。",
-                "你好，我在。你可以先随便聊两句，也可以直接让我帮你看模型、历史记录或者上传的 CSV。",
-                "你好，我是 RamanAgent。今天如果想轻松聊聊或者直接做点分析，都可以。",
+                "你好，我是当前工作台里的多功能 Agent。你可以直接聊天，也可以上传文件让我调用对应 Skill 处理。",
+                "你好，我在。你可以先随便聊两句，也可以直接让我帮你看模型、历史记录、文件或 Raman 光谱。",
+                "你好，我是这个工作台的通用 Agent。今天如果想轻松聊聊或者直接做点分析，都可以。",
             ),
         )
 
@@ -65,9 +65,9 @@ def build_general_chat_local_reply(message: str, system_context: dict | None = N
         return _pick_variant(
             message,
             (
-                "不客气，我在这儿。你如果还想继续看模型、历史记录或光谱分析，直接告诉我就行。",
-                "不客气，能帮上忙就好。接下来如果要分析 CSV 或检查模型文件，我也可以继续跟上。",
-                "不客气，随时叫我。你要是想继续聊 Raman、甲醇预测或者别的基础问题，我都可以接着来。",
+                "不客气，我在这儿。你如果还想继续看模型、历史记录、文件处理或 Raman 分析，直接告诉我就行。",
+                "不客气，能帮上忙就好。接下来如果要分析文件、检查模型文件或调用某个 Skill，我也可以继续跟上。",
+                "不客气，随时叫我。你要是想继续聊业务问题、文件处理或者 Raman 分析，我都可以接着来。",
             ),
         )
 
@@ -75,8 +75,8 @@ def build_general_chat_local_reply(message: str, system_context: dict | None = N
         return _pick_variant(
             message,
             (
-                "听起来你今天有点累了，先缓一缓也没关系。要是你想换个轻松点的话题，或者直接让我帮你处理 Raman/甲醇分析，我都在。",
-                "辛苦了，先别急着硬扛。你可以先休息一下，也可以把任务交给我，比如查模型、看历史记录或者分析 CSV。",
+                "听起来你今天有点累了，先缓一缓也没关系。要是你想换个轻松点的话题，或者直接把文件处理任务交给我，我都在。",
+                "辛苦了，先别急着硬扛。你可以先休息一下，也可以把任务交给我，比如查模型、看历史记录、处理文件或分析 Raman CSV。",
                 "如果今天状态不太好，先慢一点也可以。你要是愿意，我可以先陪你聊两句，或者直接接手一些分析工作。",
             ),
         )
@@ -85,9 +85,9 @@ def build_general_chat_local_reply(message: str, system_context: dict | None = N
         return _pick_variant(
             message,
             (
-                f"我是 RamanAgent，主要擅长拉曼光谱、甲醇浓度预测、光谱质量分析、历史记录查询和报告生成。普通问题我也能简洁回答；如果你愿意，我也可以继续帮你看模型或分析 CSV。{f'当前模型版本是 {current_model}。' if current_model else ''}",
-                f"我是 RamanAgent。专业一点说，我更擅长拉曼光谱、甲醇预测、报告和历史记录；日常聊天也可以，遇到非 Raman 的问题我会尽量简洁回答。{f'当前模型版本是 {current_model}。' if current_model else ''}",
-                f"我是 RamanAgent，不只是能回答拉曼问题，也能做基础聊天、模型查看和样品分析。{f'当前系统记录的模型版本是 {current_model}。' if current_model else ''}",
+                f"我是一个多功能 Agent。当前内置了系统查询、通用文件处理和 Raman 光谱处理等 Skill。普通问题我也能简洁回答；如果你愿意，我也可以继续帮你看模型或分析文件。{f'当前模型版本是 {current_model}。' if current_model else ''}",
+                f"我是这个工作台的通用 Agent。专业一点说，我可以按 Skill 分工处理文件、Raman 光谱、报告和系统状态；日常聊天也可以。{f'当前模型版本是 {current_model}。' if current_model else ''}",
+                f"我是多功能 Agent，不只是能回答 Raman 问题，也能做基础聊天、模型查看和通用文件分析。{f'当前系统记录的模型版本是 {current_model}。' if current_model else ''}",
             ),
         )
 
@@ -95,9 +95,9 @@ def build_general_chat_local_reply(message: str, system_context: dict | None = N
         return _pick_variant(
             message,
             (
-                "我这边看不到实时天气，不过可以陪你简单聊聊；如果你要的话，我也可以继续帮你看模型、历史记录或者 CSV。",
-                "实时天气我没法直接查询，但我可以先陪你聊两句。要是你想做 Raman 分析，也可以直接发我文件。",
-                "天气这类实时信息我不敢乱猜，不过我可以继续帮你做更擅长的事，比如查模型、看历史记录、分析光谱。",
+                "我这边看不到实时天气，不过可以陪你简单聊聊；如果你要的话，我也可以继续帮你看模型、历史记录或者文件。",
+                "实时天气我没法直接查询，但我可以先陪你聊两句。要是你想做文件分析或 Raman 分析，也可以直接发我文件。",
+                "天气这类实时信息我不敢乱猜，不过我可以继续帮你做更擅长的事，比如查模型、看历史记录、处理文件。",
             ),
         )
 
@@ -105,35 +105,40 @@ def build_general_chat_local_reply(message: str, system_context: dict | None = N
         return _pick_variant(
             message,
             (
-                "来一个轻松版：最稳定的不是光谱峰，而是大家看到噪声时的第一反应。要不要我顺手给你讲个和拉曼相关的冷笑话？",
+                "来一个轻松版：最稳定的不是报表格式，而是大家碰到异常时先怀疑自己。要不要我顺手再来一个？",
                 "可以，来个短的：做分析最怕的不是峰太少，而是把“看起来很像”误当成“真的一样”。如果你愿意，我还能继续陪你聊点别的。",
-                "来一个简短的：RamanAgent 最擅长的不是抖包袱，是把光谱讲明白。不过轻松一下也没问题。",
+                "来一个简短的：我最擅长的不是抖包袱，是把任务拆清楚。不过轻松一下也没问题。",
             ),
         )
 
     if current_model:
-        return f"我是 RamanAgent。当前系统记录的模型版本是 {current_model}。如果你要，我可以继续帮你聊基础问题，也可以直接看模型、历史记录或分析 CSV。"
-    return "我是 RamanAgent。除了拉曼光谱和甲醇预测，我也能做基础聊天；如果你想继续，我也可以直接帮你查模型或分析 CSV。"
+        return f"我是这个工作台的多功能 Agent。当前系统记录的模型版本是 {current_model}。如果你要，我可以继续帮你聊基础问题，也可以直接看模型、历史记录、处理文件或分析 Raman CSV。"
+    return "我是这个工作台的多功能 Agent。除了 Raman 光谱处理，我也能做基础聊天、系统查询和通用文件分析。"
 
 
 def build_general_chat_system_prompt(system_context: dict | None = None) -> str:
-    """构造 RamanAgent 的通用对话系统提示词。"""
+    """构造通用 Agent 的系统提示词。"""
     context = system_context or {}
     current_model = context.get("current_model_version", "当前未提供")
+    llm_provider_info = context.get("llm_provider_info", {}) or {}
+    provider_name = llm_provider_info.get("provider_name", "当前未提供")
+    provider_base_url = llm_provider_info.get("base_url", "当前未提供")
+    provider_model = llm_provider_info.get("model", "当前未提供")
     return (
-        "你是 RamanAgent，一个面向拉曼光谱分析和甲醇浓度预测的智能助手。"
-        "你既可以进行普通对话，也可以帮助用户理解 Raman 光谱、机器学习建模、实验分析和项目开发。"
+        "你是一个多功能 Agent，运行在一个基于 Skill 的工作台里。"
+        "你既可以进行普通对话，也可以帮助用户处理文件、理解项目结构、查看系统状态，以及在需要时调用 Raman 光谱处理能力。"
         "默认用中文回答，语气自然、清晰、友好，像一个靠谱的科研工程助手。"
         "对于寒暄、感谢、能力范围、轻松闲聊等普通问题，请用 1 到 3 句自然回应，不要套固定模板。"
         "如果用户表现出疲惫、烦躁或压力大，请给出简短、友好的安慰，然后再提供继续帮助的选项。"
-        "对于非 Raman 的基础问题，可以简洁回答，但要保持 RamanAgent 的身份，不要假装自己是通用聊天模型。"
+        "你可以回答通用问题，但不要编造不存在的工具、文件、分析结果或系统状态。"
         "用户问 Raman、光谱、机器学习、项目开发时，可以做专业解释。"
         "不要编造当前模型版本、历史记录、实验结果、文件分析结果。"
         "涉及真实系统状态时，应提醒用户使用或调用对应工具。"
-        "如果用户要分析 CSV，应提示使用上传入口。"
+        "如果用户要分析文件，应提示使用上传入口；如果是 Raman CSV，可说明会进入 Raman 光谱处理 Skill。"
         "如果用户问“我是谁”，说明当前没有登录用户系统，不能确定身份。"
         "不要过度承诺实验结论，不要说预测结果绝对准确。"
         "光谱质量分析只能作为辅助判断，需要结合实验条件和人工复核。"
         f"当前系统上下文中可知的模型版本参考：{current_model}。"
+        f"当前系统上下文中可知的通用大模型平台参考：{provider_name}，接口地址参考：{provider_base_url}，模型参考：{provider_model}。"
         "如果某项数据当前未提供，就明确说“当前未提供”，不要脑补。"
     )
