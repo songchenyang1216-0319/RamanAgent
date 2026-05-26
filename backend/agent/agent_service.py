@@ -8,7 +8,15 @@ from pathlib import Path
 from backend.agent.agent_planner import AgentPlan, AgentPlanner
 from backend.agent.llm_intent_classifier import LLMIntentClassifier
 from backend.agent.intent_router import detect_intent
-from backend.agent.session_store import get_last_analysis, get_session, update_session
+from backend.agent.session_store import (
+    build_task_state_response,
+    get_last_analysis,
+    get_recent_messages,
+    get_session,
+    get_task_state,
+    update_session,
+    update_task_state,
+)
 from backend.agent.tool_registry import get_tool_spec, list_tool_specs
 from backend.agent.prompts.general_chat_prompt import build_general_chat_local_reply
 from backend.services.history_service import list_analysis_history
@@ -56,6 +64,122 @@ class MultiSkillAgentService:
     def _llm_provider_info(self) -> dict:
         """返回当前通用大模型平台信息。"""
         return LLMService().get_provider_info()
+
+    def _build_session_memory_context(self, message: str, session_id: str | None = None) -> dict:
+        """把持久化会话记忆压缩成普通聊天和 Skill 可复用的上下文。"""
+        if not session_id:
+            return {
+                "session_id": None,
+                "summary": "",
+                "recent_messages": [],
+                "last_analysis": None,
+                "task_state": None,
+            }
+
+        session = get_session(session_id) or {}
+        recent_messages = list(get_recent_messages(session_id, limit=8))
+        current_message = str(message or "").strip()
+        if recent_messages:
+            last_item = recent_messages[-1]
+            if (
+                isinstance(last_item, dict)
+                and str(last_item.get("role") or "").strip() == "user"
+                and str(last_item.get("content") or "").strip() == current_message
+            ):
+                recent_messages = recent_messages[:-1]
+
+        return {
+            "session_id": session_id,
+            "summary": str(session.get("summary") or "").strip(),
+            "recent_messages": recent_messages,
+            "last_analysis": get_last_analysis(session_id),
+            "task_state": get_task_state(session_id),
+        }
+
+    def _refresh_task_state_for_response(self, session_id: str | None, response: dict | None) -> None:
+        """根据本轮回复，把任务状态写回数据库。"""
+        if not session_id or not isinstance(response, dict):
+            return
+
+        skill_name = str(response.get("skill_name") or "").strip()
+        action_name = str(response.get("action_name") or "").strip()
+        skill_mode = str(response.get("skill_mode") or "").strip()
+        result_kind = str(response.get("result_kind") or "").strip()
+        response_data = dict(response.get("data") or {})
+        response_model_info = dict(response.get("model_info") or {})
+        saved_file = str(response.get("saved_file") or response_data.get("file_path") or "").strip()
+        model_version = str(response_model_info.get("model_version") or response_data.get("model_version") or "").strip()
+
+        current_state = get_task_state(session_id) or {}
+        pipeline = list(current_state.get("pipeline") or [])
+        pipeline_label = action_name or result_kind or skill_name
+        if pipeline_label and pipeline_label not in pipeline:
+            pipeline.append(pipeline_label)
+
+        steps_done = dict(current_state.get("steps_done") or {})
+        success = bool(response.get("success"))
+
+        patch: dict[str, object] = {
+            "selected_skill": skill_name or current_state.get("selected_skill"),
+            "selected_action": action_name or current_state.get("selected_action"),
+            "pipeline": pipeline,
+        }
+        if saved_file:
+            patch["current_file"] = saved_file
+        if model_version:
+            patch["selected_model"] = model_version
+
+        if skill_mode == "prompt_only":
+            patch["current_task"] = current_state.get("current_task") or "document_analysis"
+            if success:
+                steps_done["uploaded"] = True
+                steps_done["explained"] = True
+        elif skill_name == "raman_spectroscopy_skill":
+            patch["current_task"] = "raman_analysis"
+            if success:
+                if action_name == "predict_methanol_concentration":
+                    steps_done["uploaded"] = True
+                    steps_done["preprocessed"] = True
+                    steps_done["predicted"] = True
+                    if response.get("llm_explanation") or response.get("reply"):
+                        steps_done["explained"] = True
+                    if response.get("report"):
+                        steps_done["reported"] = True
+                elif action_name in {"explain_prediction", "explain_result"}:
+                    steps_done["explained"] = True
+                elif action_name in {"generate_summary", "generate_markdown_report", "generate_experiment_record", "export_report"}:
+                    steps_done["reported"] = True
+                elif action_name == "find_similar_history":
+                    steps_done["compared_history"] = True
+        else:
+            if success and action_name in {"generate_report"}:
+                steps_done["reported"] = True
+            if success and action_name in {"find_similar_history"}:
+                steps_done["compared_history"] = True
+
+        patch["steps_done"] = steps_done
+        if action_name == "find_similar_history":
+            patch["selected_action"] = action_name
+        if response.get("reply"):
+            patch["last_updated_at"] = None
+
+        if response.get("report") or response_data.get("report_path"):
+            patch["last_report"] = response.get("report") or response_data.get("report_path")
+
+        if skill_name == "raman_spectroscopy_skill" and action_name == "predict_methanol_concentration":
+            result = dict(response_data.get("result") or response.get("result") or {})
+            patch["last_prediction"] = {
+                "final_prediction": result.get("final_prediction"),
+                "unit": result.get("unit"),
+                "sample_file": result.get("sample_file") or saved_file or current_state.get("current_file"),
+                "model_name": response_model_info.get("model_name") or response_data.get("model_name"),
+                "model_version": model_version or response_model_info.get("model_version"),
+            }
+
+        try:
+            update_task_state(session_id, patch)
+        except Exception:
+            logger.exception("更新任务状态失败: session_id=%s response_skill=%s action=%s", session_id, skill_name, action_name)
 
     def _infer_system_info_target(self, message: str, params: dict | None = None) -> str:
         """统一识别系统信息问题的具体目标，避免每个问法都单独加路由。"""
@@ -208,6 +332,8 @@ class MultiSkillAgentService:
             return "report_generation"
         if self._contains_any(text, ("和历史样品比一下", "和之前的样品比一下", "跟历史样品比一下", "和历史记录比一下", "和之前样品比一下")):
             return "compare_history"
+        if self._contains_any(text, ("现在做到哪一步了", "做到哪一步", "当前进度", "现在进度", "任务状态", "当前状态", "还差什么", "下一步做什么", "接下来做什么", "把剩下的做完", "继续完成", "继续做完")):
+            return "task_state_status"
         if self._contains_any(text, ("这个结果靠谱吗", "刚才那个样品怎么样", "刚才那个结果怎么样", "这个结果怎么样", "刚才这个样品靠谱吗")):
             return "last_analysis_explanation"
         if "报告" in text and ("刚才" in text or "这个结果" in text or "这个样品" in text):
@@ -394,7 +520,7 @@ class MultiSkillAgentService:
         if session_id:
             update_session(session_id, "last_analysis", updated_last_analysis)
 
-        return self._build_response(
+        response = self._build_response(
             intent="last_analysis_followup",
             category="tool",
             reply=reply,
@@ -414,6 +540,8 @@ class MultiSkillAgentService:
             },
             session_id=session_id,
         )
+        self._refresh_task_state_for_response(session_id, response)
+        return response
 
     def _build_last_prediction_response(self, last_analysis: dict, session_id: str | None, debug: bool = False) -> dict:
         """基于最近一次分析结果回答预测浓度。"""
@@ -422,7 +550,7 @@ class MultiSkillAgentService:
         unit = result.get("unit", "") or ""
         sample_file = result.get("sample_file") or "刚才那个样品"
         reply = f"{sample_file} 的最近一次融合预测值是 {float(final_prediction):.4f}{unit}。"
-        return self._build_response(
+        response = self._build_response(
             intent="last_prediction",
             category="tool",
             reply=reply,
@@ -439,6 +567,8 @@ class MultiSkillAgentService:
             },
             session_id=session_id,
         )
+        self._refresh_task_state_for_response(session_id, response)
+        return response
 
     def _build_last_analysis_explanation_response(self, last_analysis: dict, session_id: str | None, debug: bool = False) -> dict:
         """基于最近一次分析结果回答结果解释。"""
@@ -461,7 +591,7 @@ class MultiSkillAgentService:
             updated_last_analysis["llm_explanation"] = explanation
             if session_id:
                 update_session(session_id, "last_analysis", updated_last_analysis)
-        return self._build_response(
+        response = self._build_response(
             intent="explain_result",
             category="tool",
             reply=explanation,
@@ -472,24 +602,28 @@ class MultiSkillAgentService:
             data={"explanation": explanation},
             session_id=session_id,
         )
+        self._refresh_task_state_for_response(session_id, response)
+        return response
 
     def _build_context_report_response(self, last_analysis: dict, session_id: str | None, debug: bool = False) -> dict:
         """基于最近一次分析结果生成或返回报告。"""
         if not self._is_raman_analysis(last_analysis):
-            return self._build_response(
-                intent="generate_report",
-                category="tool",
-                reply="我已经记住了刚才那次文件分析结果，但这类结果当前没有单独的报告生成动作。",
-                next_action="你可以继续让我基于刚才的结果做总结、提炼要点，或者继续处理同一个文件。",
+                response = self._build_response(
+                    intent="generate_report",
+                    category="tool",
+                    reply="我已经记住了刚才那次文件分析结果，但这类结果当前没有单独的报告生成动作。",
+                    next_action="你可以继续让我基于刚才的结果做总结、提炼要点，或者继续处理同一个文件。",
                 tool_used="session_last_analysis",
                 tool_result=None,
                 debug=debug,
                 data={
                     "skill_name": last_analysis.get("skill_name"),
                     "saved_file": last_analysis.get("saved_file"),
-                },
-                session_id=session_id,
-            )
+                    },
+                    session_id=session_id,
+                )
+                self._refresh_task_state_for_response(session_id, response)
+                return response
 
         report = last_analysis.get("report")
         if not report:
@@ -514,7 +648,7 @@ class MultiSkillAgentService:
                     update_session(session_id, "last_analysis", updated_last_analysis)
                     update_session(session_id, "last_report", report)
             else:
-                return self._build_response(
+                response = self._build_response(
                     intent="generate_report",
                     category="tool",
                     reply=report_result.get("error_message", "报告生成失败。"),
@@ -527,9 +661,11 @@ class MultiSkillAgentService:
                     data=None,
                     session_id=session_id,
                 )
+                self._refresh_task_state_for_response(session_id, response)
+                return response
 
         report_file = (report or {}).get("report_file") or "最近一次报告"
-        return self._build_response(
+        response = self._build_response(
             intent="generate_report",
             category="tool",
             reply=f"刚才那次分析的报告已经准备好了，当前报告文件是 {report_file}。",
@@ -540,11 +676,13 @@ class MultiSkillAgentService:
             data=report,
             session_id=session_id,
         )
+        self._refresh_task_state_for_response(session_id, response)
+        return response
 
     def _build_context_compare_response(self, last_analysis: dict, session_id: str | None, debug: bool = False) -> dict:
         """基于最近一次分析结果做历史相似样品对比。"""
         if not self._is_raman_analysis(last_analysis):
-            return self._build_response(
+            response = self._build_response(
                 intent="find_similar_history",
                 category="tool",
                 reply="最近一次结果是通用文件分析，不适合直接做 Raman 历史样品相似度对比。",
@@ -560,6 +698,8 @@ class MultiSkillAgentService:
                 },
                 session_id=session_id,
             )
+            self._refresh_task_state_for_response(session_id, response)
+            return response
 
         compare_result = self.run_tool(
             "find_similar_history",
@@ -568,7 +708,7 @@ class MultiSkillAgentService:
             },
         )
         success = bool(compare_result.get("success"))
-        return self._build_response(
+        response = self._build_response(
             intent="find_similar_history",
             category="tool",
             reply=compare_result.get("message", "历史相似样品对比已完成。"),
@@ -584,6 +724,8 @@ class MultiSkillAgentService:
             },
             session_id=session_id,
         )
+        self._refresh_task_state_for_response(session_id, response)
+        return response
 
     def _handle_session_context_request(self, message: str, session_id: str | None, debug: bool = False) -> dict | None:
         """优先处理引用本轮最近一次分析结果的提问。"""
@@ -593,6 +735,34 @@ class MultiSkillAgentService:
         context_type = self._context_reference_type(message)
         if context_type is None:
             return None
+
+        if context_type == "task_state_status":
+            task_state = build_task_state_response(session_id)
+            completed = task_state.get("completed_steps", []) or []
+            pending = task_state.get("pending_steps", []) or []
+            next_step = task_state.get("next_step")
+            if completed:
+                completed_text = "、".join(str(item) for item in completed[:6] if item)
+                reply = f"当前会话已经完成了：{completed_text}。"
+            else:
+                reply = "当前会话还没有记录到已完成的任务步骤。"
+            if next_step:
+                reply += f" 下一步建议先处理：{next_step}。"
+            if pending:
+                reply += f" 还未完成的步骤还有：{'、'.join(str(item) for item in pending[:6] if item)}。"
+            return self._build_response(
+                intent="task_state_status",
+                category="tool",
+                reply=reply,
+                next_action="如果你想继续，我可以基于当前任务状态帮你把下一步接着做完。",
+                tool_used="session_task_state",
+                tool_result=None,
+                debug=debug,
+                success=True,
+                error_message=None,
+                data=task_state,
+                session_id=session_id,
+            )
 
         last_analysis = get_last_analysis(session_id)
         if not last_analysis:
@@ -1100,6 +1270,7 @@ class MultiSkillAgentService:
             "current_model_version": self._current_model_version(),
             "llm_provider_info": self._llm_provider_info(),
         }
+        system_context.update(self._build_session_memory_context(message, session_id=session_id))
         intent = intent_info.get("intent", "general_chat")
         category = intent_info.get("category", "general_chat")
         local_reply = build_general_chat_local_reply(message, system_context=system_context, intent=intent)

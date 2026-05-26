@@ -122,6 +122,32 @@ export async function switchAgentModel(modelName) {
   });
 }
 
+export async function createAgentSession() {
+  return requestJson("/api/agent/session/new", {
+    method: "POST",
+    timeoutMs: 8000,
+  });
+}
+
+export async function getAgentSession(sessionId) {
+  if (!sessionId) {
+    return { success: false, error_message: "sessionId 不能为空。" };
+  }
+  return requestJson(`/api/agent/session/${encodeURIComponent(sessionId)}`, {
+    timeoutMs: 8000,
+  });
+}
+
+export async function clearAgentSession(sessionId) {
+  if (!sessionId) {
+    return { success: false, error_message: "sessionId 不能为空。" };
+  }
+  return requestJson(`/api/agent/session/${encodeURIComponent(sessionId)}/clear`, {
+    method: "POST",
+    timeoutMs: 8000,
+  });
+}
+
 export async function loadSkills() {
   return requestJson("/api/agent/skills", { timeoutMs: 8000 });
 }

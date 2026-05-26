@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
-from backend.agent.session_store import get_session
+from backend.agent.session_store import get_last_analysis, get_recent_messages, get_task_state, get_session
 from backend.services.llm_service import LLMService
 
 from .base import BaseSkill, SkillResult
@@ -653,21 +653,20 @@ class UploadedPackageSkill(BaseSkill):
         if not session:
             return context
 
-        recent_messages = session.get("messages") or []
         recent_context: list[dict[str, str]] = []
-        for item in recent_messages[-6:]:
+        current_message = str(user_message or "").strip()
+        for item in get_recent_messages(session_id, limit=6):
             if not isinstance(item, dict):
                 continue
-            recent_context.append(
-                {
-                    "role": str(item.get("role") or ""),
-                    "content": str(item.get("content") or ""),
-                }
-            )
+            role = str(item.get("role") or "").strip()
+            content = str(item.get("content") or "").strip()
+            if role == "user" and content == current_message:
+                continue
+            recent_context.append({"role": role, "content": content})
         if recent_context:
             context["recent_messages"] = recent_context
 
-        last_analysis = session.get("last_analysis") or {}
+        last_analysis = get_last_analysis(session_id) or {}
         if isinstance(last_analysis, dict) and last_analysis:
             context["last_analysis"] = {
                 "skill_name": last_analysis.get("skill_name"),
@@ -675,6 +674,10 @@ class UploadedPackageSkill(BaseSkill):
                 "summary": last_analysis.get("llm_explanation") or last_analysis.get("reply") or last_analysis.get("message"),
                 "saved_file": last_analysis.get("saved_file"),
             }
+
+        task_state = get_task_state(session_id)
+        if isinstance(task_state, dict) and task_state:
+            context["task_state"] = task_state
         return context
 
     def _run_prompt_only_skill(

@@ -1,7 +1,9 @@
 import {
   checkCurrentModel,
+  clearAgentSession,
   getAgentModels,
   getCurrentModel,
+  getAgentSession,
   loadSkills as fetchSkills,
   deleteSkill as requestDeleteSkill,
   sendAgentChat,
@@ -269,6 +271,116 @@ function renderWelcomeMessage() {
     "text",
     state.sessionId ? `已恢复 ${state.sessionId}` : "新会话",
   );
+}
+
+function truncateText(value, limit = 240) {
+  const text = String(value ?? "").trim();
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, limit - 12))}……[已截断]`;
+}
+
+function formatCompactJson(value, limit = 1200) {
+  if (value === null || value === undefined || value === "") {
+    return "";
+  }
+  let text = "";
+  try {
+    text = JSON.stringify(value, null, 2);
+  } catch {
+    text = String(value);
+  }
+  return truncateText(text, limit);
+}
+
+function renderSessionMemorySummary(payload) {
+  const summary = truncateText(payload?.summary || "", 220) || "暂无摘要";
+  const lastAnalysis = payload?.last_analysis ? formatCompactJson(payload.last_analysis, 600) : "暂无最近分析";
+  const taskState = payload?.task_state_view ? formatCompactJson(payload.task_state_view, 700) : formatCompactJson(payload.task_state, 700);
+  appendMessage(
+    "system",
+    `
+      <div class="memory-summary-card">
+        <p><strong>会话 ID：</strong>${escapeHtml(payload?.session_id || state.sessionId || "未创建")}</p>
+        <p><strong>摘要：</strong>${escapeHtml(summary)}</p>
+        <p><strong>消息数：</strong>${escapeHtml(String(payload?.message_count ?? 0))}</p>
+        <details>
+          <summary>查看简要记忆</summary>
+          <div class="analysis-detail-json">${escapeHtml(lastAnalysis)}</div>
+          <div class="analysis-detail-json">${escapeHtml(taskState)}</div>
+        </details>
+      </div>
+    `,
+    "text",
+    buildNowText(),
+  );
+}
+
+function clearChatWindow() {
+  const container = $("chatMessages");
+  if (container) {
+    container.innerHTML = "";
+  }
+  removeTypingMessage();
+  renderWelcomeMessage();
+}
+
+async function handleNewSession() {
+  persistSessionId("");
+  state.selectedFile = null;
+  const fileInput = $("fileInput");
+  if (fileInput) {
+    fileInput.value = "";
+  }
+  renderSelectedFileChip(null);
+  clearChatWindow();
+  setChatStatus("已切换为新会话，下一次发送时后端会自动创建新的 session。");
+}
+
+async function handleClearSessionMemory() {
+  const sessionId = state.sessionId;
+  if (!sessionId) {
+    window.alert("当前还没有可清空的 session，请先发送一次消息或新建会话。");
+    return;
+  }
+  try {
+    const response = await clearAgentSession(sessionId);
+    if (!response.success) {
+      throw new Error(response.error_message || "清空记忆失败");
+    }
+    state.selectedFile = null;
+    const fileInput = $("fileInput");
+    if (fileInput) {
+      fileInput.value = "";
+    }
+    renderSelectedFileChip(null);
+    clearChatWindow();
+    setChatStatus(`当前会话记忆已清空：${sessionId}`);
+    window.alert(response.message || "当前会话记忆已清空。");
+  } catch (error) {
+    console.error("清空会话记忆失败：", error);
+    window.alert(`清空会话记忆失败：${error.message || "未知错误"}`);
+  }
+}
+
+async function handleInspectSession() {
+  const sessionId = state.sessionId;
+  if (!sessionId) {
+    window.alert("当前还没有 session，请先发送一次消息。");
+    return;
+  }
+  try {
+    const response = await getAgentSession(sessionId);
+    if (!response.success) {
+      throw new Error(response.error_message || "读取记忆失败");
+    }
+    renderSessionMemorySummary(response);
+    setChatStatus(`已查看当前会话记忆：${sessionId}`);
+  } catch (error) {
+    console.error("查看会话记忆失败：", error);
+    window.alert(`查看会话记忆失败：${error.message || "未知错误"}`);
+  }
 }
 
 function getSkillIcon(category, source) {
@@ -1173,17 +1285,9 @@ function bindComposerEvents() {
 }
 
 function bindPageEvents() {
-  $("clearSessionBtn")?.addEventListener("click", () => {
-    persistSessionId("");
-    state.selectedFile = null;
-    const fileInput = $("fileInput");
-    if (fileInput) {
-      fileInput.value = "";
-    }
-    renderSelectedFileChip(null);
-    renderWelcomeMessage();
-    setChatStatus("会话已清空。");
-  });
+  $("newSessionBtn")?.addEventListener("click", handleNewSession);
+  $("clearMemoryBtn")?.addEventListener("click", handleClearSessionMemory);
+  $("inspectMemoryBtn")?.addEventListener("click", handleInspectSession);
 
   $("skillsButton")?.addEventListener("click", openSkillsPanel);
   $("skillsManageBtn")?.addEventListener("click", openSkillsPanel);

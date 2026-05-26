@@ -10,6 +10,7 @@ from backend.api.history_api import router as history_router
 from backend.api.methanol_api import router as methanol_router
 from backend.model_registry.model_registry_router import router as model_registry_router
 from backend.services.model_registry_service import ModelRegistryService
+from backend.db.database import init_agent_memory_db
 from backend.services.history_service import init_history_db
 from raman_core.methanol.config import FIGURE_DIR, OUTPUT_DIR, PROJECT_ROOT, REPORT_DIR, ensure_dirs
 
@@ -45,6 +46,7 @@ app.mount("/app", StaticFiles(directory=str(PROJECT_ROOT / "frontend"), html=Tru
 def startup() -> None:
     """应用启动时初始化历史数据库。"""
     init_history_db()
+    init_agent_memory_db()
     ModelRegistryService().load_registry()
 
 

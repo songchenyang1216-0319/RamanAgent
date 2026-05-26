@@ -3,6 +3,45 @@
 from __future__ import annotations
 
 import hashlib
+import json
+
+
+def _compact_text(value: object, limit: int = 420) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 16)] + "……[已截断]"
+
+
+def _format_recent_messages(recent_messages: list[dict] | None, limit: int = 8) -> str:
+    items = []
+    for item in (recent_messages or [])[-limit:]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip() or "user"
+        content = _compact_text(item.get("content") or "", 260)
+        if not content:
+            continue
+        if role == "assistant":
+            label = "助手"
+        elif role == "system":
+            label = "系统"
+        elif role == "tool":
+            label = "工具"
+        else:
+            label = "用户"
+        items.append(f"{label}：{content}")
+    return "\n".join(items)
+
+
+def _format_compact_json(value: object, limit: int = 1800) -> str:
+    if value in (None, "", [], {}):
+        return ""
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str, indent=2)
+    except Exception:
+        text = str(value)
+    return _compact_text(text, limit)
 
 
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
@@ -124,6 +163,25 @@ def build_general_chat_system_prompt(system_context: dict | None = None) -> str:
     provider_name = llm_provider_info.get("provider_name", "当前未提供")
     provider_base_url = llm_provider_info.get("base_url", "当前未提供")
     provider_model = llm_provider_info.get("model", "当前未提供")
+    summary = _compact_text(context.get("summary") or "", 1000)
+    recent_messages = _format_recent_messages(context.get("recent_messages") or [], limit=8)
+    last_analysis = _format_compact_json(context.get("last_analysis"), limit=2000)
+    task_state = _format_compact_json(context.get("task_state"), limit=1800)
+    session_id = _compact_text(context.get("session_id") or "", 120)
+
+    memory_sections = []
+    if session_id:
+        memory_sections.append(f"会话 ID：{session_id}")
+    if summary:
+        memory_sections.append(f"会话摘要：{summary}")
+    if recent_messages:
+        memory_sections.append("最近对话：\n" + recent_messages)
+    if last_analysis:
+        memory_sections.append("最近分析：\n" + last_analysis)
+    if task_state:
+        memory_sections.append("任务状态：\n" + task_state)
+
+    memory_block = "\n\n".join(memory_sections)
     return (
         "你是一个多功能 Agent，运行在一个基于 Skill 的工作台里。"
         "你既可以进行普通对话，也可以帮助用户处理文件、理解项目结构、查看系统状态，以及在需要时调用 Raman 光谱处理能力。"
@@ -140,5 +198,8 @@ def build_general_chat_system_prompt(system_context: dict | None = None) -> str:
         "光谱质量分析只能作为辅助判断，需要结合实验条件和人工复核。"
         f"当前系统上下文中可知的模型版本参考：{current_model}。"
         f"当前系统上下文中可知的通用大模型平台参考：{provider_name}，接口地址参考：{provider_base_url}，模型参考：{provider_model}。"
-        "如果某项数据当前未提供，就明确说“当前未提供”，不要脑补。"
+        "如果提供了会话记忆，请把它视为当前会话的真实上下文，优先用于指代消解和连续追问。"
+        "如果用户问“刚才”“继续”“下一步”“现在做到哪一步了”“生成刚才的报告”“和历史样品比一下”等问题，请结合最近对话、最近分析和任务状态来回答，不要重新猜测。"
+        + (f"\n\n【当前会话记忆】\n{memory_block}" if memory_block else "")
+        + "如果某项数据当前未提供，就明确说“当前未提供”，不要脑补。"
     )

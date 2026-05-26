@@ -12,7 +12,16 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from backend.agent.agent_service import RamanAgentService
-from backend.agent.session_store import append_message, create_session, update_session
+from backend.agent.session_store import (
+    append_message,
+    build_task_state_response,
+    clear_session_memory,
+    create_session,
+    get_session,
+    get_task_state,
+    update_session,
+    update_task_state,
+)
 from backend.skills.registry import (
     execute_skill,
     get_action,
@@ -170,6 +179,124 @@ def _build_chat_messages_payload(
             }
         ],
     }
+
+
+def _compact_last_analysis(last_analysis: dict | None) -> dict | None:
+    """把 last_analysis 压缩成前端调试可展示的简要版本。"""
+    if not isinstance(last_analysis, dict) or not last_analysis:
+        return None
+    result = dict(last_analysis.get("result") or {})
+    data = dict(last_analysis.get("data") or {})
+    return {
+        "skill_name": last_analysis.get("skill_name"),
+        "action_name": last_analysis.get("action_name"),
+        "saved_file": last_analysis.get("saved_file"),
+        "reply": last_analysis.get("reply") or last_analysis.get("llm_explanation"),
+        "summary": str(last_analysis.get("llm_explanation") or last_analysis.get("reply") or "")[:240],
+        "result_kind": last_analysis.get("result_kind"),
+        "final_prediction": result.get("final_prediction"),
+        "unit": result.get("unit") or data.get("unit"),
+        "report": last_analysis.get("report"),
+    }
+
+
+def _build_session_memory_response(session_id: str) -> dict:
+    """返回当前 session 的简要记忆信息。"""
+    session = get_session(session_id)
+    if session is None:
+        return {
+            "session_id": session_id,
+            "summary": "",
+            "last_analysis": None,
+            "task_state": None,
+            "message_count": 0,
+            "updated_at": None,
+        }
+    task_state = get_task_state(session_id) or {}
+    return {
+        "session_id": session_id,
+        "title": session.get("title"),
+        "summary": session.get("summary") or "",
+        "last_analysis": _compact_last_analysis(session.get("last_analysis")),
+        "task_state": task_state,
+        "task_state_view": build_task_state_response(session_id),
+        "message_count": int(session.get("message_count") or 0),
+        "updated_at": session.get("updated_at"),
+        "last_file": session.get("last_file"),
+        "last_report": session.get("last_report"),
+    }
+
+
+def _apply_task_state_from_response(session_id: str, response: dict) -> None:
+    """根据当前回复结果更新会话任务状态。"""
+    if not session_id or not isinstance(response, dict):
+        return
+
+    task_state = get_task_state(session_id) or {}
+    steps_done = dict(task_state.get("steps_done") or {})
+    pipeline = list(task_state.get("pipeline") or [])
+    action_name = str(response.get("action_name") or "").strip()
+    skill_name = str(response.get("skill_name") or "").strip()
+    skill_mode = str(response.get("skill_mode") or "").strip()
+    result_kind = str(response.get("result_kind") or "").strip()
+    data = dict(response.get("data") or {})
+    saved_file = str(response.get("saved_file") or data.get("file_path") or "").strip()
+    model_info = dict(response.get("model_info") or {})
+    model_version = str(model_info.get("model_version") or data.get("model_version") or "").strip()
+
+    if action_name and action_name not in pipeline:
+        pipeline.append(action_name)
+    if skill_name and skill_name not in pipeline:
+        pipeline.append(skill_name)
+
+    patch: dict[str, object] = {
+        "current_task": task_state.get("current_task") or ("document_analysis" if skill_mode == "prompt_only" else "raman_analysis" if skill_name == "raman_spectroscopy_skill" else task_state.get("current_task")),
+        "current_file": saved_file or task_state.get("current_file"),
+        "selected_skill": skill_name or task_state.get("selected_skill"),
+        "selected_action": action_name or task_state.get("selected_action"),
+        "selected_model": model_version or task_state.get("selected_model"),
+        "pipeline": pipeline,
+        "steps_done": steps_done,
+    }
+
+    if response.get("success"):
+        if skill_mode == "prompt_only":
+            steps_done["uploaded"] = True
+            steps_done["explained"] = True
+        if skill_name == "raman_spectroscopy_skill" and action_name == "predict_methanol_concentration":
+            steps_done["uploaded"] = True
+            steps_done["preprocessed"] = True
+            steps_done["predicted"] = True
+            if response.get("llm_explanation") or response.get("reply"):
+                steps_done["explained"] = True
+            if response.get("report") or data.get("report_path"):
+                steps_done["reported"] = True
+        if action_name in {"explain_result", "explain_prediction"}:
+            steps_done["explained"] = True
+        if action_name in {"generate_report", "generate_markdown_report", "generate_experiment_record", "export_report"} or response.get("report"):
+            steps_done["reported"] = True
+        if action_name == "find_similar_history":
+            steps_done["compared_history"] = True
+        if action_name in {"predict_methanol_concentration", "run_uploaded_skill"} and skill_name != "raman_spectroscopy_skill":
+            steps_done["uploaded"] = True
+
+    if response.get("report"):
+        patch["last_report"] = response.get("report")
+    if skill_name == "raman_spectroscopy_skill" and action_name == "predict_methanol_concentration":
+        result = dict(data.get("result") or response.get("result") or {})
+        patch["last_prediction"] = {
+            "final_prediction": result.get("final_prediction"),
+            "unit": result.get("unit"),
+            "sample_file": result.get("sample_file") or saved_file,
+            "model_name": model_info.get("model_name") or data.get("model_name"),
+            "model_version": model_version,
+        }
+
+    patch["steps_done"] = steps_done
+    try:
+        update_task_state(session_id, patch)
+    except Exception:
+        logger.exception("更新 session task_state 失败: session_id=%s skill=%s action=%s", session_id, skill_name, action_name)
 
 
 def _attach_source(payload: dict, source: str, route_info: dict | None = None, debug: bool = False) -> dict:
@@ -894,6 +1021,40 @@ def switch_agent_model(payload: SwitchModelRequest) -> dict:
     }
 
 
+@router.post("/session/new")
+def create_new_session() -> dict:
+    """创建一个新的会话。"""
+    session = create_session()
+    return {
+        "success": True,
+        "session_id": session["session_id"],
+    }
+
+
+@router.get("/session/{session_id}")
+def get_session_memory(session_id: str) -> dict:
+    """读取当前会话的持久化记忆。"""
+    session = get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="未找到对应的会话。")
+    payload = _build_session_memory_response(session_id)
+    payload["success"] = True
+    return payload
+
+
+@router.post("/session/{session_id}/clear")
+def clear_session(session_id: str) -> dict:
+    """清空当前会话的记忆内容。"""
+    try:
+        session = clear_session_memory(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    payload = _build_session_memory_response(str(session.get("session_id") or session_id))
+    payload["success"] = True
+    payload["message"] = "当前会话记忆已清空。"
+    return payload
+
+
 @router.post("/chat")
 async def chat(request: Request) -> dict:
     """统一聊天入口，支持 JSON 聊天和 FormData 文件分析。"""
@@ -999,6 +1160,7 @@ async def chat(request: Request) -> dict:
                 update_session(resolved_session_id, "last_analysis", session_analysis)
                 update_session(resolved_session_id, "last_file", response.get("saved_file"))
                 update_session(resolved_session_id, "last_report", response.get("report"))
+                _apply_task_state_from_response(resolved_session_id, response)
                 logger.info(
                     "Attachment skill executed: skill=%s action=%s success=%s elapsed_ms=%.2f summary=%s",
                     matched_skill,
@@ -1021,6 +1183,7 @@ async def chat(request: Request) -> dict:
             update_session(resolved_session_id, "last_analysis", session_analysis)
             update_session(resolved_session_id, "last_file", response.get("saved_file"))
             update_session(resolved_session_id, "last_report", response.get("report"))
+            _apply_task_state_from_response(resolved_session_id, response)
             return response
         started = time.perf_counter()
         response = _analyze_uploaded_file_with_skills(
@@ -1043,6 +1206,7 @@ async def chat(request: Request) -> dict:
             update_session(resolved_session_id, "last_file", response.get("saved_file"))
             update_session(resolved_session_id, "last_report", response.get("report"))
             append_message(resolved_session_id, "assistant", response.get("llm_explanation", "分析完成。"))
+            _apply_task_state_from_response(resolved_session_id, response)
         else:
             append_message(resolved_session_id, "assistant", response.get("error_message", "分析失败。"))
         return response
@@ -1081,6 +1245,7 @@ async def chat(request: Request) -> dict:
                 ),
             }, "fallback", route_info=route_info, debug=debug)
             append_message(resolved_session_id, "assistant", content)
+            _apply_task_state_from_response(resolved_session_id, response)
             return response
 
         if matched_skill == "raman_spectroscopy_skill" and matched_action in {
@@ -1109,6 +1274,7 @@ async def chat(request: Request) -> dict:
                 ),
             }, "fallback", route_info=route_info, debug=debug)
             append_message(resolved_session_id, "assistant", content)
+            _apply_task_state_from_response(resolved_session_id, response)
             return response
 
         skill_result = execute_skill(
@@ -1140,6 +1306,7 @@ async def chat(request: Request) -> dict:
                 ),
             }, "skill_execution", route_info=route_info, debug=debug)
             append_message(resolved_session_id, "assistant", skill_summary)
+            _apply_task_state_from_response(resolved_session_id, response)
             logger.info("Skill executed: skill=%s action=%s success=%s elapsed_ms=%.2f", matched_skill, matched_action, skill_result.success, (time.perf_counter() - started) * 1000)
             return response
 
@@ -1186,6 +1353,7 @@ async def chat(request: Request) -> dict:
             (skill_result.summary or "")[:160],
         )
         append_message(resolved_session_id, "assistant", reply)
+        _apply_task_state_from_response(resolved_session_id, response)
         return response
 
     structured_response = service.chat(effective_message, debug=debug, session_id=resolved_session_id)
@@ -1206,6 +1374,7 @@ async def chat(request: Request) -> dict:
         structured_response.get("category"),
     )
     append_message(resolved_session_id, "assistant", structured_response.get("reply", ""))
+    _apply_task_state_from_response(resolved_session_id, structured_response)
     return structured_response
 
 
@@ -1314,6 +1483,7 @@ async def analyze_file(
             update_session(resolved_session_id, "last_analysis", session_analysis)
             update_session(resolved_session_id, "last_file", response_payload.get("saved_file"))
             update_session(resolved_session_id, "last_report", response_payload.get("report"))
+            _apply_task_state_from_response(resolved_session_id, response_payload)
             logger.info(
                 "Analyze-file attachment skill executed: skill=%s action=%s success=%s elapsed_ms=%.2f summary=%s",
                 matched_skill,
@@ -1336,6 +1506,7 @@ async def analyze_file(
         update_session(resolved_session_id, "last_analysis", session_analysis)
         update_session(resolved_session_id, "last_file", response_payload.get("saved_file"))
         update_session(resolved_session_id, "last_report", response_payload.get("report"))
+        _apply_task_state_from_response(resolved_session_id, response_payload)
         return response_payload
     started = time.perf_counter()
     skill_result = execute_skill(
@@ -1413,6 +1584,7 @@ async def analyze_file(
     update_session(resolved_session_id, "last_analysis", session_analysis)
     update_session(resolved_session_id, "last_file", response_payload.get("saved_file"))
     update_session(resolved_session_id, "last_report", response_payload.get("report"))
+    _apply_task_state_from_response(resolved_session_id, response_payload)
     logger.info(
         "Analyze-file csv skill executed: skill=%s action=%s success=%s elapsed_ms=%.2f summary=%s",
         "raman_spectroscopy_skill",

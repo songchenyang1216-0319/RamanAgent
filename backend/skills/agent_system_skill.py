@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.agent.session_store import update_session
+from backend.agent.session_store import clear_session_memory, update_session
 from backend.services.history_service import list_analysis_history
 
 from .base import BaseSkill, SkillResult
@@ -138,9 +138,7 @@ class AgentSystemSkill(BaseSkill):
                     summary="清空会话需要 session_id。",
                     errors=["缺少 session_id 参数。"],
                 )
-            update_session(session_id, "last_analysis", None)
-            update_session(session_id, "last_file", None)
-            update_session(session_id, "last_report", None)
+            clear_session_memory(session_id)
             return SkillResult(
                 success=True,
                 skill_name=self.name,
