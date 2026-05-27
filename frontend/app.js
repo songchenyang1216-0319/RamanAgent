@@ -456,6 +456,76 @@ function escapeOrFallback(value, fallback = "") {
   return text || fallback;
 }
 
+const MODEL_CATEGORY_LABELS = {
+  text_chat: "文本对话",
+  vision_understanding: "视觉理解",
+  image_edit: "图像编辑",
+  ocr: "OCR",
+  embedding: "向量检索",
+  audio: "音频",
+  unknown: "待确认",
+};
+
+function normalizeModelCategories(model = {}) {
+  const supported = Array.isArray(model.supported_categories)
+    ? model.supported_categories.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  if (supported.length) {
+    return supported;
+  }
+  switch (String(model.model_type || "").trim()) {
+    case "vision":
+      return ["text_chat", "vision_understanding"];
+    case "image_edit":
+      return ["image_edit"];
+    case "ocr":
+      return ["ocr"];
+    case "embedding":
+      return ["embedding"];
+    case "audio":
+      return ["audio"];
+    case "text":
+      return ["text_chat"];
+    default:
+      return model.supports_vision ? ["text_chat", "vision_understanding"] : ["unknown"];
+  }
+}
+
+function buildModelCategoryBadge(category, labelOverride = "") {
+  const key = String(category || "").trim();
+  const label = String(labelOverride || "").trim() || MODEL_CATEGORY_LABELS[key] || key || "待确认";
+  const className = key === "vision_understanding" ? "ok" : key === "unknown" ? "warn" : "";
+  return `<span class="model-badge ${className}">${escapeHtml(label)}</span>`;
+}
+
+function buildModelCategorySummary(model = {}) {
+  const categories = normalizeModelCategories(model);
+  const backendLabels = Array.isArray(model.supported_category_labels)
+    ? model.supported_category_labels.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const labels = backendLabels.length === categories.length && backendLabels.length ? backendLabels : categories.map((category) => MODEL_CATEGORY_LABELS[category] || category || "待确认");
+  const summary = escapeOrFallback(model.category_summary || labels.join(" / "), "待确认");
+  const sourceMap = {
+    explicit: "规则确认",
+    heuristic: "自动识别",
+    default: "默认推断",
+  };
+  const statusMap = {
+    confirmed: "已确认",
+    default: "待确认",
+  };
+  const status = statusMap[String(model.category_status || "").trim()] || "待确认";
+  const source = sourceMap[String(model.category_source || "").trim()] || "";
+  const reason = escapeOrFallback(model.category_reason || "", "");
+  return {
+    chips: categories.map((category, index) => buildModelCategoryBadge(category, labels[index] || "")).join(""),
+    summary,
+    status,
+    source,
+    reason,
+  };
+}
+
 function resolveAssistantModelInfo(message = {}, fallback = {}) {
   const raw = message.llm_model_info || fallback.llm_model_info || message.model_info || fallback.model_info || {};
   const providerDisplayName = escapeOrFallback(raw.provider_display_name || raw.provider_name || raw.provider || "");
@@ -466,6 +536,7 @@ function resolveAssistantModelInfo(message = {}, fallback = {}) {
     provider_display_name: providerDisplayName,
     model: escapeOrFallback(raw.model || ""),
     model_display_name: modelDisplayName,
+    model_type: escapeOrFallback(raw.model_type || "", ""),
     display_name: displayName,
     available: raw.available,
     reason: escapeOrFallback(raw.reason || ""),
@@ -484,18 +555,26 @@ function buildAssistantSourceBadge(message = {}, fallback = {}) {
   if (!message) {
     return "";
   }
-  const source = escapeOrFallback(message.source || fallback.source, "");
+  const toolInfo = (message.tool_info && typeof message.tool_info === "object" ? message.tool_info : null)
+    || (fallback.tool_info && typeof fallback.tool_info === "object" ? fallback.tool_info : null)
+    || {};
+  const source = escapeOrFallback(toolInfo.source || message.source || fallback.source, "");
   const toolName = escapeOrFallback(message.tool_used || fallback.tool_used || "", "");
-  const rawSkillName = escapeOrFallback(message.skill_name || message.analysis?.skill_name, "");
+  const rawSkillName = escapeOrFallback(toolInfo.skill || message.skill_name || message.analysis?.skill_name, "");
   const skillName = rawSkillName === "web-search" ? "联网搜索" : rawSkillName;
-  const actionName = escapeOrFallback(message.action_name || message.analysis?.action_name, "");
+  const actionName = escapeOrFallback(toolInfo.action || message.action_name || message.analysis?.action_name, "");
   const skillMode = escapeOrFallback(message.skill_mode || message.analysis?.skill_mode || fallback.skill_mode, "");
   const routeInfo = message.route_info || fallback.route_info || {};
   const route = escapeOrFallback(routeInfo.route, "");
   const reason = escapeOrFallback(routeInfo.reason, "");
-  const fileName = escapeOrFallback(message.saved_file || message.file_name || message.analysis?.details?.saved_file || "", "");
-  const success = message.success !== undefined ? Boolean(message.success) : fallback.success;
-  const errorMessage = escapeOrFallback(message.error_message || message.llm_error || message.analysis?.details?.error_message || "", "");
+  const fileName = escapeOrFallback(toolInfo.filename || message.saved_file || message.file_name || message.analysis?.details?.saved_file || "", "");
+  const imageType = escapeOrFallback(toolInfo.image_type || "", "");
+  const tableRows = toolInfo.rows;
+  const tableColumns = toolInfo.columns;
+  const sheetName = escapeOrFallback(toolInfo.sheet_name || "", "");
+  const mode = escapeOrFallback(toolInfo.mode || "", "");
+  const success = toolInfo.success !== undefined ? Boolean(toolInfo.success) : (message.success !== undefined ? Boolean(message.success) : fallback.success);
+  const errorMessage = escapeOrFallback(toolInfo.error || message.error_message || message.llm_error || message.analysis?.details?.error_message || "", "");
   const durationMs = Number(message.elapsed_ms || message.client_elapsed_ms || message.analysis?.details?.duration_ms || message.data?.duration_ms || fallback.client_elapsed_ms || 0);
 
   const summaryParts = [];
@@ -521,12 +600,27 @@ function buildAssistantSourceBadge(message = {}, fallback = {}) {
   if (actionName) {
     detailRows.push(["Action", actionName]);
   }
+  if (imageType) {
+    detailRows.push(["Image Type", imageType]);
+  }
   if (skillMode) {
     const modeLabel = skillMode === "prompt_only" ? "提示词型" : skillMode === "executable" ? "可执行型" : skillMode;
     detailRows.push(["模式", modeLabel]);
   }
+  if (mode) {
+    detailRows.push(["Mode", mode]);
+  }
   if (fileName) {
     detailRows.push(["文件", fileName]);
+  }
+  if (tableRows !== undefined && tableRows !== null && tableRows !== "") {
+    detailRows.push(["行数", String(tableRows)]);
+  }
+  if (tableColumns !== undefined && tableColumns !== null && tableColumns !== "") {
+    detailRows.push(["列数", String(tableColumns)]);
+  }
+  if (sheetName) {
+    detailRows.push(["Sheet", sheetName]);
   }
   if (Number.isFinite(durationMs) && durationMs > 0) {
     detailRows.push(["耗时", formatDurationMs(durationMs)]);
@@ -593,8 +687,30 @@ function renderWebSearchSources(payload = {}) {
   `;
 }
 
+function isImageFileLike(fileOrName) {
+  const name = typeof fileOrName === "string" ? fileOrName : fileOrName?.name || "";
+  return /\.(png|jpg|jpeg|webp|bmp|tif|tiff)$/i.test(String(name || ""));
+}
+
 function appendFileCard(file) {
   if (!file) {
+    return;
+  }
+  if (isImageFileLike(file)) {
+    const previewUrl = URL.createObjectURL(file);
+    appendMessage(
+      "user",
+      `
+        <div class="file-card image-card">
+          <img src="${previewUrl}" alt="${escapeHtml(file.name)}" class="chat-upload-thumb" />
+          <div class="file-card-body">
+            <strong>图片</strong>
+            <span>${escapeHtml(file.name)}</span>
+          </div>
+        </div>
+      `,
+      "text",
+    );
     return;
   }
   appendMessage(
@@ -1685,8 +1801,9 @@ function renderModelList(payload = {}) {
         <div class="model-provider-list">
           ${models.length
             ? models
-                .map((model) => {
+              .map((model) => {
                   const selected = Boolean(model.selected);
+                  const categorySummary = buildModelCategorySummary(model);
                   return `
                     <button
                       type="button"
@@ -1700,7 +1817,13 @@ function renderModelList(payload = {}) {
                       </div>
                       <div class="model-list-meta">
                         <span class="model-badge">${escapeHtml(model.id || "")}</span>
+                        ${categorySummary.chips}
+                        <span class="model-badge ${categorySummary.status === "已确认" ? "ok" : "warn"}">${escapeHtml(categorySummary.status)}</span>
                       </div>
+                      <p class="model-list-summary">
+                        分类：${escapeHtml(categorySummary.summary)}
+                        ${categorySummary.source ? ` · 来源：${escapeHtml(categorySummary.source)}` : ""}
+                      </p>
                     </button>
                   `;
                 })

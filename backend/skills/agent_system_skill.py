@@ -114,7 +114,7 @@ class AgentSystemSkill(BaseSkill):
                 action_name=action_name,
                 summary="上传帮助已准备好。",
                 data={
-                    "message": "点击聊天输入框左侧的 + 选择文件后发送。普通文档、表格、压缩包会优先走通用文件处理 Skill；Raman 光谱 CSV 会进入 Raman 光谱处理 Skill。"
+                    "message": "点击聊天输入框左侧的 + 选择文件后发送。普通文档会优先走文档处理 Skill；普通 CSV / Excel 会进入表格数据分析 Skill；Raman 光谱表格会继续进入 Raman 光谱处理 Skill。"
                 },
             )
 

@@ -58,6 +58,7 @@ class LLMService:
         self.model = str(self.selection.get("model_id") or "").strip()
         self.model_display_name = str(self.selection.get("model_name") or self.model).strip()
         self.display_name = f"{self.provider_display_name} · {self.model_display_name}".strip(" ·")
+        self.supports_vision = bool(self.selection.get("supports_vision"))
         self.api_key_env = str(self.provider_config.get("api_key_env") or "").strip()
         self.base_url = str(self.provider_config.get("base_url") or "").strip()
         self.api_key = str(self.provider_config.get("api_key") or "").strip()
@@ -114,6 +115,7 @@ class LLMService:
             "api_key_env": self.api_key_env,
             "available": available,
             "reason": reason,
+            "supports_vision": self.supports_vision,
             "import_ready": self.import_error_message is None,
             "import_error_message": self.import_error_message,
             "fallback_mode": not available,
@@ -127,9 +129,17 @@ class LLMService:
             "provider_display_name": provider_info.get("provider_display_name"),
             "model": provider_info.get("model"),
             "model_display_name": provider_info.get("model_name"),
+            "model_type": self.selection.get("model_type"),
+            "supported_categories": list(self.selection.get("supported_categories") or []),
+            "supported_category_labels": list(self.selection.get("supported_category_labels") or []),
+            "category_summary": self.selection.get("category_summary") or "",
+            "category_source": self.selection.get("category_source") or "",
+            "category_reason": self.selection.get("category_reason") or "",
+            "category_status": self.selection.get("category_status") or "",
             "display_name": provider_info.get("display_name"),
             "available": provider_info.get("available"),
             "reason": provider_info.get("reason"),
+            "supports_vision": provider_info.get("supports_vision"),
             "base_url": provider_info.get("base_url"),
             "api_key_env": provider_info.get("api_key_env"),
         }

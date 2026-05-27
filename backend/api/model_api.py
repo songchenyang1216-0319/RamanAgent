@@ -54,6 +54,14 @@ def list_provider_models(
             {
                 "id": model["id"],
                 "display_name": model["display_name"],
+                "model_type": model.get("model_type") or "unknown",
+                "supports_vision": bool(model.get("supports_vision")),
+                "supported_categories": list(model.get("supported_categories") or []),
+                "supported_category_labels": list(model.get("supported_category_labels") or []),
+                "category_summary": model.get("category_summary") or "",
+                "category_source": model.get("category_source") or "",
+                "category_reason": model.get("category_reason") or "",
+                "category_status": model.get("category_status") or "",
                 "selected": current["provider_id"] == provider_id and current["model_id"] == model["id"],
             }
         )
@@ -83,6 +91,14 @@ def get_current_model(
         "provider_name": current["provider_name"],
         "model_id": current["model_id"],
         "model_name": current["model_name"],
+        "model_type": current.get("model_type") or "unknown",
+        "supports_vision": bool(current.get("supports_vision")),
+        "supported_categories": list(current.get("supported_categories") or []),
+        "supported_category_labels": list(current.get("supported_category_labels") or []),
+        "category_summary": current.get("category_summary") or "",
+        "category_source": current.get("category_source") or "",
+        "category_reason": current.get("category_reason") or "",
+        "category_status": current.get("category_status") or "",
         "configured": current["configured"],
         "reason": current.get("reason") or "",
     }
@@ -114,6 +130,14 @@ def select_model(payload: ModelSelectRequest) -> dict:
         "provider_name": current["provider_name"],
         "model_id": current["model_id"],
         "model_name": current["model_name"],
+        "model_type": current.get("model_type") or "unknown",
+        "supports_vision": bool(current.get("supports_vision")),
+        "supported_categories": list(current.get("supported_categories") or []),
+        "supported_category_labels": list(current.get("supported_category_labels") or []),
+        "category_summary": current.get("category_summary") or "",
+        "category_source": current.get("category_source") or "",
+        "category_reason": current.get("category_reason") or "",
+        "category_status": current.get("category_status") or "",
         "message": f"已切换到{current['provider_name']} / {current['model_id']}",
     }
 

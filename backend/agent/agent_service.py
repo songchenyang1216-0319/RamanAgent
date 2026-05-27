@@ -1403,7 +1403,7 @@ class MultiSkillAgentService:
             )
             llm_reply = (llm_response or {}).get("reply", "") or ""
 
-        reply = llm_reply or local_reply
+        reply = local_reply if intent == "capability_intro" else (llm_reply or local_reply)
         next_action = "你可以继续像普通聊天一样追问；如果需要处理文件或调用 Skill，也可以直接告诉我目标。"
         if intent in {"capability_intro", "smalltalk", "gratitude", "comfort", "weather", "joke"}:
             next_action = "你可以继续聊任何主题；涉及实时信息时，说“联网查一下”我会走搜索工具。"

@@ -400,6 +400,14 @@ button {
   line-height: 1.5;
 }
 
+.model-list-summary {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
 .model-list-reason {
   color: var(--warning);
 }
@@ -527,6 +535,30 @@ button {
   border-style: dashed;
   border-radius: 14px;
   background: #f8fbff;
+}
+
+.file-card.image-card {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  max-width: 240px;
+  border-radius: 18px;
+  padding: 10px;
+}
+
+.file-card-body {
+  display: grid;
+  gap: 4px;
+}
+
+.chat-upload-thumb {
+  display: block;
+  width: min(100%, 220px);
+  max-width: 220px;
+  max-height: 180px;
+  border-radius: 12px;
+  object-fit: contain;
+  background: #eef2f7;
 }
 
 .analysis-card {
@@ -1636,7 +1668,8 @@ button {
   .analysis-figures,
   .skills-panel-stats,
   .preprocess-grid,
-  .explanation-grid {
+  .explanation-grid,
+  .skill-trace-details {
     grid-template-columns: 1fr;
   }
 

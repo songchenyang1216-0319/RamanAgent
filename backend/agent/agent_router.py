@@ -33,6 +33,13 @@ from backend.skills.registry import (
     set_action_enabled,
     set_skill_enabled,
 )
+from backend.skills.data_analysis_skill import (
+    DATA_ANALYSIS_MESSAGE_KEYWORDS,
+    RAMAN_MESSAGE_KEYWORDS,
+    detect_raman_table_signal,
+    infer_data_analysis_action,
+    is_supported_table_suffix,
+)
 from backend.skills.upload_service import delete_uploaded_skill, list_uploaded_skills, save_uploaded_skill
 from backend.services.history_service import save_analysis_history
 from backend.api.methanol_api import build_figure_web_urls, build_report_web_urls
@@ -53,6 +60,11 @@ user_memory_manager = UserMemoryManager()
 task_trace_manager = TaskTraceManager(workspace_manager=workspace_manager)
 UPLOAD_DIR = OUTPUT_DIR / "uploads"
 logger = logging.getLogger(__name__)
+IMAGE_FILE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+TABLE_FILE_SUFFIXES = {".csv", ".xlsx", ".xls"}
+DATA_ANALYSIS_MISSING_MESSAGE = "当前识别为普通表格数据，但 data-analysis-skill 未启用。你可以在 Skill 管理中启用表格数据分析 Skill。"
+IMAGE_ROUTER_MISSING_MESSAGE = "当前已识别为图片文件，但还没有安装图片处理 Skill。你可以上传 image-router-skill，或后续启用视觉模型能力。"
+RAMAN_SKILL_DISABLED_MESSAGE = "当前识别为 Raman / 光谱数据请求，但 Raman 光谱分析 Skill 未启用。"
 
 
 def _llm_model_info(
@@ -75,6 +87,14 @@ def _llm_model_info(
 
 def _normalize_skill_key(value: object) -> str:
     return re.sub(r"\s+", "", str(value or "")).strip().lower()
+
+
+def _is_image_file_suffix(file_suffix: str | None) -> bool:
+    return str(file_suffix or "").lower() in IMAGE_FILE_SUFFIXES
+
+
+def _is_table_file_suffix(file_suffix: str | None) -> bool:
+    return str(file_suffix or "").lower() in TABLE_FILE_SUFFIXES
 
 
 class AgentChatRequest(BaseModel):
@@ -866,36 +886,81 @@ def _looks_like_generic_file_task(message: str) -> bool:
     return any(keyword in normalized for keyword in keywords)
 
 
-def _looks_like_raman_file_task(message: str) -> bool:
+def _looks_like_data_analysis_task(message: str) -> bool:
     normalized = str(message or "").strip().lower()
-    keywords = (
-        "光谱",
-        "拉曼",
-        "raman",
-        "甲醇",
-        "预测",
-        "峰位",
-        "基线",
-        "去噪",
-        "归一化",
-        "浓度",
+    keywords = tuple(str(keyword).strip().lower() for keyword in DATA_ANALYSIS_MESSAGE_KEYWORDS) + (
+        "数据分析",
+        "字段统计",
+        "表格统计",
+        "表格分析",
+        "数据汇总",
+        "表格内容",
+        "重复行",
+        "重复值",
+        "数据质量",
+        "缺失值",
+        "平均值",
+        "最大值",
+        "最小值",
+        "分类统计",
     )
     return any(keyword in normalized for keyword in keywords)
 
 
-def _select_skill_route(message: str, has_file: bool = False, file_suffix: str | None = None) -> tuple[str | None, str | None, dict | None]:
+def _looks_like_raman_file_task(message: str) -> bool:
+    normalized = str(message or "").strip().lower()
+    keywords = tuple(str(keyword).strip().lower() for keyword in RAMAN_MESSAGE_KEYWORDS)
+    return any(keyword in normalized for keyword in keywords)
+
+
+def _infer_table_skill_route(message: str, file_path: str | Path | None = None, file_suffix: str | None = None) -> tuple[str | None, str | None, dict | None]:
+    normalized = str(message or "").strip().lower()
+    suffix = str(file_suffix or "").lower()
+    if not _is_table_file_suffix(suffix):
+        return None, None, None
+
+    if _looks_like_raman_file_task(message):
+        return "raman_spectroscopy_skill", "predict_methanol_concentration", {"route": "table_raman_route", "reason": "raman_message_keywords"}
+
+    if _looks_like_data_analysis_task(message):
+        if get_skill("data-analysis-skill") is not None:
+            return "data-analysis-skill", infer_data_analysis_action(message, default_action="summarize_table"), {"route": "table_data_analysis_route", "reason": "data_analysis_message_keywords"}
+        return None, None, {"route": "data_analysis_missing_skill", "reason": "data_analysis_skill_not_enabled"}
+
+    table_signal = detect_raman_table_signal(file_path) if file_path else {"is_raman": False, "reason": "no_file_path", "matched_hints": []}
+    if table_signal.get("is_raman"):
+        return "raman_spectroscopy_skill", "predict_methanol_concentration", {
+            "route": "table_raman_route",
+            "reason": f"raman_table_signal:{table_signal.get('reason')}",
+        }
+
+    if get_skill("data-analysis-skill") is not None:
+        return "data-analysis-skill", infer_data_analysis_action(message, default_action="summarize_table"), {
+            "route": "table_data_analysis_route",
+            "reason": f"default_table_analysis:{table_signal.get('reason')}",
+        }
+    return None, None, {"route": "data_analysis_missing_skill", "reason": "data_analysis_skill_not_enabled"}
+
+
+def _select_skill_route(
+    message: str,
+    has_file: bool = False,
+    file_suffix: str | None = None,
+    file_path: str | Path | None = None,
+) -> tuple[str | None, str | None, dict | None]:
     file_suffix = str(file_suffix or "").lower()
     if not has_file and _looks_like_knowledge_question(message) and not _has_explicit_execution_intent(message):
         return None, None, {"route": "knowledge_question_skip_skill", "reason": "no_file_no_execution_intent"}
-    if has_file and file_suffix == ".csv":
-        if _looks_like_raman_file_task(message):
-            return _match_builtin_skill(message, has_file=has_file, file_suffix=file_suffix)
-        if not _looks_like_generic_file_task(message):
-            return _match_builtin_skill(message, has_file=has_file, file_suffix=file_suffix)
+    if has_file and _is_image_file_suffix(file_suffix):
+        if get_skill("image-router-skill") is not None:
+            return "image-router-skill", "classify_image_type", {"route": "builtin_skill_rule", "reason": f"image_router:{file_suffix}"}
+        return None, None, {"route": "image_router_missing_skill", "reason": f"image_suffix:{file_suffix}"}
+    if has_file and _is_table_file_suffix(file_suffix):
+        return _infer_table_skill_route(message, file_path=file_path, file_suffix=file_suffix)
     uploaded_skill, route_info = match_uploaded_skill(message, file_suffix=file_suffix)
     if uploaded_skill is not None:
         return uploaded_skill.name, "run_uploaded_skill", route_info
-    if has_file and file_suffix and file_suffix != ".csv":
+    if has_file and file_suffix and not _is_table_file_suffix(file_suffix):
         return None, None, {"route": "no_matching_file_skill", "reason": f"unsupported_suffix:{file_suffix}"}
     return _match_builtin_skill(message, has_file=has_file, file_suffix=file_suffix)
 
@@ -909,7 +974,13 @@ def _build_no_matching_file_skill_response(
     route_info: dict | None = None,
     debug: bool = False,
 ) -> dict:
-    content = f"当前没有匹配到可处理 `{file_suffix or '该类型'}` 文件的 Skill。请上传支持该类型的文档 Skill，或调整现有 Skill 的 manifest 声明。"
+    route = str((route_info or {}).get("route") or "").strip()
+    if route == "image_router_missing_skill" or _is_image_file_suffix(file_suffix):
+        content = IMAGE_ROUTER_MISSING_MESSAGE
+    elif route == "data_analysis_missing_skill" or _is_table_file_suffix(file_suffix):
+        content = DATA_ANALYSIS_MISSING_MESSAGE
+    else:
+        content = f"当前没有匹配到可处理 `{file_suffix or '该类型'}` 文件的 Skill。请上传支持该类型的文档 Skill，或调整现有 Skill 的 manifest 声明。"
     response = _attach_source({
         "success": False,
         "session_id": session_id,
@@ -1071,43 +1142,67 @@ def _analyze_uploaded_file_with_skills(
     metadata: dict | None = None,
     debug: bool = False,
 ) -> dict:
-    """使用 Skill 层驱动 CSV 分析，并返回统一的聊天分析结果。"""
+    """使用 Skill 层驱动表格/CSV 分析，并返回统一的聊天分析结果。"""
     metadata = dict(metadata or {})
     warnings: list[str] = []
-    loader_skill = get_skill("raman_spectroscopy_skill")
-    if loader_skill is None:
-        return {
-            "success": False,
-            "session_id": session_id,
-            "message": message,
-            "saved_file": str(save_path.relative_to(PROJECT_ROOT)),
-            "error_message": "Skill 注册表未正确初始化，无法执行文件分析。",
-        }
-
-    target_skill_name, target_action_name, route_info = _select_skill_route(message, has_file=True, file_suffix=save_path.suffix.lower())
+    target_skill_name, target_action_name, route_info = _select_skill_route(
+        message,
+        has_file=True,
+        file_suffix=save_path.suffix.lower(),
+        file_path=save_path,
+    )
+    if route_info and route_info.get("route") in {"data_analysis_missing_skill", "image_router_missing_skill"}:
+        content = _build_no_matching_file_skill_response(
+            session_id=session_id,
+            save_path=save_path,
+            message=message,
+            file_suffix=save_path.suffix.lower(),
+            route_info=route_info,
+            debug=debug,
+        )
+        return content
     if target_skill_name is None or target_action_name is None:
-        target_skill_name = "raman_spectroscopy_skill"
-        target_action_name = "predict_methanol_concentration"
-        route_info = {"route": "builtin_skill_rule", "reason": "fallback_prediction"}
+        return _build_no_matching_file_skill_response(
+            session_id=session_id,
+            save_path=save_path,
+            message=message,
+            file_suffix=save_path.suffix.lower(),
+            route_info=route_info,
+            debug=debug,
+        )
 
-    loader_result = loader_skill.run(file_path=str(save_path), action_name="inspect_spectrum")
-    if not loader_result.success:
-        error_message = "；".join(loader_result.errors) or loader_result.summary
-        return {
-            "success": False,
-            "session_id": session_id,
-            "message": message,
-            "saved_file": str(save_path.relative_to(PROJECT_ROOT)),
-            "error_message": error_message,
-            **_build_chat_messages_payload(
-                session_id=session_id,
-                role_type="error",
-                content=error_message,
-                analysis=None,
-                skill_name="raman_spectroscopy_skill",
-                action_name="inspect_spectrum",
-            ),
-        }
+    loader_result = None
+    if target_skill_name == "raman_spectroscopy_skill":
+        loader_skill = get_skill("raman_spectroscopy_skill")
+        if loader_skill is None:
+            return {
+                "success": False,
+                "session_id": session_id,
+                "message": message,
+                "saved_file": str(save_path.relative_to(PROJECT_ROOT)),
+                "error_message": "Skill 注册表未正确初始化，无法执行 Raman 文件分析。",
+            }
+        loader_result = loader_skill.run(file_path=str(save_path), action_name="inspect_spectrum")
+        if not loader_result.success:
+            error_message = "；".join(loader_result.errors) or loader_result.summary
+            return {
+                "success": False,
+                "session_id": session_id,
+                "message": message,
+                "saved_file": str(save_path.relative_to(PROJECT_ROOT)),
+                "reply": error_message,
+                "skill_name": "raman_spectroscopy_skill",
+                "action_name": "inspect_spectrum",
+                "error_message": error_message,
+                **_build_chat_messages_payload(
+                    session_id=session_id,
+                    role_type="error",
+                    content=error_message,
+                    analysis=None,
+                    skill_name="raman_spectroscopy_skill",
+                    action_name="inspect_spectrum",
+                ),
+            }
 
     skill_result = execute_skill(
         target_skill_name,
@@ -1121,11 +1216,20 @@ def _analyze_uploaded_file_with_skills(
     )
     if not skill_result.success:
         error_message = "；".join(skill_result.errors) or skill_result.summary
+        if target_skill_name == "data-analysis-skill" and any("子能力" in str(item) and "当前已禁用" in str(item) for item in (skill_result.errors or [])):
+            error_message = f"当前表格已识别到需要调用 `{target_action_name}`，但这个子能力目前被禁用了。你可以先在 Skill 管理页面重新启用它。"
+        elif target_skill_name == "data-analysis-skill" and any("当前已禁用" in str(item) for item in (skill_result.errors or [])):
+            error_message = DATA_ANALYSIS_MISSING_MESSAGE
+        elif target_skill_name == "raman_spectroscopy_skill" and any("当前已禁用" in str(item) for item in (skill_result.errors or [])):
+            error_message = RAMAN_SKILL_DISABLED_MESSAGE
         return {
             "success": False,
             "session_id": session_id,
             "message": message,
             "saved_file": str(save_path.relative_to(PROJECT_ROOT)),
+            "reply": error_message,
+            "skill_name": target_skill_name,
+            "action_name": target_action_name,
             "error_message": error_message,
             **_build_chat_messages_payload(
                 session_id=session_id,
@@ -1148,16 +1252,19 @@ def _analyze_uploaded_file_with_skills(
         "session_id": session_id,
         "message": message or "请分析这个甲醇拉曼光谱",
         "saved_file": str(save_path.relative_to(PROJECT_ROOT)),
+        "skill_name": target_skill_name,
+        "action_name": target_action_name,
         "model_info": model_info,
         "llm_model_info": _llm_model_info(conversation_id=session_id),
         "experiment_metadata": metadata,
         "warnings": list(dict.fromkeys(warnings)),
         "skill_results": {
-            "raman_spectroscopy_skill.loader": loader_result.to_dict(),
             target_skill_name: skill_result.to_dict(),
             "agent_system_skill": model_health.to_dict(),
         },
     }
+    if loader_result is not None:
+        response_payload["skill_results"]["raman_spectroscopy_skill.loader"] = loader_result.to_dict()
 
     # 甲醇分析仍然走完整旧链路，保证当前上传分析体验稳定。
     if target_skill_name == "raman_spectroscopy_skill" and target_action_name == "predict_methanol_concentration":
@@ -1169,6 +1276,9 @@ def _analyze_uploaded_file_with_skills(
                 "session_id": session_id,
                 "message": message,
                 "saved_file": str(save_path.relative_to(PROJECT_ROOT)),
+                "reply": error_message,
+                "skill_name": target_skill_name,
+                "action_name": target_action_name,
                 "error_message": error_message,
                 "llm_model_info": _llm_model_info(conversation_id=session_id),
                 **_build_chat_messages_payload(
@@ -1272,23 +1382,43 @@ def _analyze_uploaded_file_with_skills(
         return _attach_source(response_payload, "skill_execution", route_info=route_info, debug=debug)
 
     skill_payload = skill_result.to_dict()
+    generic_reply = str(
+        skill_result.data.get("analysis_markdown")
+        or skill_result.data.get("reply_text")
+        or skill_result.summary
+        or "表格分析完成。"
+    )
+    tool_info = dict(skill_result.data.get("tool_info") or {})
+    if target_skill_name == "data-analysis-skill":
+        tool_info.setdefault("source", "skill_execution")
+        tool_info.setdefault("skill", target_skill_name)
+        tool_info.setdefault("action", target_action_name)
+        tool_info.setdefault("filename", save_path.name)
+        tool_info.setdefault("rows", skill_result.data.get("metadata", {}).get("rows", ""))
+        tool_info.setdefault("columns", skill_result.data.get("metadata", {}).get("columns", ""))
+        tool_info.setdefault("sheet_name", skill_result.data.get("metadata", {}).get("sheet_name", ""))
+        tool_info.setdefault("success", bool(skill_result.success))
+        tool_info.setdefault("error", "；".join(skill_result.errors) if skill_result.errors else "")
+        tool_info.setdefault("mode", "data_analysis")
     response_payload.update(
         {
             "result": skill_payload.get("data", {}),
             "professional_analysis": {},
-            "llm_explanation": skill_result.summary,
+            "reply": generic_reply,
+            "llm_explanation": generic_reply,
             "llm_error": None,
             "report": None,
             "web_urls": {"figures": {}, "report_view": "", "report_download": ""},
             "warnings": list(dict.fromkeys(warnings + list(skill_result.errors))),
             "route_info": route_info,
+            "tool_info": tool_info,
         }
     )
     analysis_message = _build_skill_analysis_payload(
         target_skill_name,
         target_action_name,
         skill_payload,
-        message=skill_result.summary,
+        message=generic_reply,
         save_path=response_payload["saved_file"],
         extra_details={"sample_info": metadata},
     )
@@ -1296,8 +1426,8 @@ def _analyze_uploaded_file_with_skills(
         **response_payload,
         **_build_chat_messages_payload(
             session_id=session_id,
-            role_type="analysis",
-            content=analysis_message["summary"],
+            role_type="text" if target_skill_name == "data-analysis-skill" else "analysis",
+            content=generic_reply if target_skill_name == "data-analysis-skill" else analysis_message["summary"],
             analysis=analysis_message,
             skill_name=target_skill_name,
             action_name=target_action_name,
@@ -1529,11 +1659,12 @@ async def chat(request: Request) -> dict:
     if uploaded_file is not None and getattr(uploaded_file, "filename", ""):
         save_path = await _save_uploaded_attachment(uploaded_file, user_id=resolved_user_id, conversation_id=resolved_session_id)
         input_files = _workspace_input_files(resolved_user_id, resolved_session_id, save_path)
-        if save_path.suffix.lower() != ".csv":
+        if not _is_table_file_suffix(save_path.suffix.lower()):
             matched_skill, matched_action, route_info = _select_skill_route(
                 effective_message,
                 has_file=True,
                 file_suffix=save_path.suffix.lower(),
+                file_path=save_path,
             )
             if matched_skill is not None and matched_action is not None:
                 task, _ = _start_task_trace(
@@ -1567,35 +1698,55 @@ async def chat(request: Request) -> dict:
                     message=effective_message,
                     original_message=effective_message,
                 )
-                reply = str(skill_result.data.get("reply_text") or skill_result.summary or "文档 Skill 执行完成。")
-                result_kind = "prompt_only_skill" if matched_skill_mode == "prompt_only" else _resolve_result_kind(matched_skill, matched_action)
+                resolved_action_name = str(skill_result.action_name or skill_result.data.get("action") or matched_action or "").strip() or matched_action
+                is_image_skill = matched_skill == "image-router-skill"
+                reply = str(
+                    skill_result.data.get("analysis_markdown")
+                    or skill_result.data.get("reply_text")
+                    or skill_result.summary
+                    or ("图片分析完成。" if is_image_skill else "文档 Skill 执行完成。")
+                )
+                if is_image_skill and not skill_result.success and any("当前已禁用" in str(item) for item in (skill_result.errors or [])):
+                    reply = "当前已识别为图片文件，但 image-router-skill 当前被禁用。你可以在 Skill 管理页面重新启用它。"
+                result_kind = "prompt_only_skill" if matched_skill_mode == "prompt_only" else _resolve_result_kind(matched_skill, resolved_action_name)
                 analysis_payload = _build_skill_analysis_payload(
                     matched_skill,
-                    matched_action,
+                    resolved_action_name,
                     skill_result.to_dict(),
                     message=reply,
                     save_path=str(save_path),
                 )
+                tool_info = dict(skill_result.data.get("tool_info") or {})
+                if is_image_skill:
+                    tool_info.setdefault("filename", save_path.name)
+                    tool_info.setdefault("mode", "image_router")
+                    tool_info.setdefault("source", "skill_execution")
+                    tool_info.setdefault("skill", matched_skill)
+                    tool_info.setdefault("action", resolved_action_name)
+                    tool_info.setdefault("success", bool(skill_result.success))
+                    tool_info.setdefault("image_type", str(skill_result.data.get("image_type") or "UNKNOWN_IMAGE"))
                 response = _attach_source({
                     "success": skill_result.success,
                     "session_id": resolved_session_id,
                     "reply": reply,
                     "error_message": None if skill_result.success else "；".join(skill_result.errors) or reply,
-                    "intent": matched_action,
+                    "intent": "IMAGE_ANALYSIS" if is_image_skill else matched_action,
                     "category": "tool",
                     "skill_name": matched_skill,
-                    "action_name": matched_action,
+                    "action_name": resolved_action_name,
                     "skill_mode": matched_skill_mode,
                     "data": skill_result.data,
                     "errors": skill_result.errors,
+                    "saved_file": str(save_path.relative_to(PROJECT_ROOT)),
+                    "tool_info": tool_info,
                     "task_id": task["task_id"],
                     **_build_chat_messages_payload(
                         session_id=resolved_session_id,
-                        role_type="text" if matched_skill_mode == "prompt_only" else ("analysis" if result_kind == "uploaded_skill" else "text"),
+                        role_type="text" if is_image_skill or matched_skill_mode == "prompt_only" else ("analysis" if result_kind == "uploaded_skill" else "text"),
                         content=reply,
-                        analysis=analysis_payload if matched_skill_mode == "prompt_only" or result_kind == "uploaded_skill" else None,
+                        analysis=analysis_payload if (matched_skill_mode == "prompt_only" or result_kind == "uploaded_skill") and not is_image_skill else None,
                         skill_name=matched_skill,
-                        action_name=matched_action,
+                        action_name=resolved_action_name,
                         result_kind=result_kind,
                         skill_mode=matched_skill_mode,
                     ),
@@ -1603,7 +1754,7 @@ async def chat(request: Request) -> dict:
                 _record_skill_trace(
                     task_id=task["task_id"],
                     skill_name=matched_skill,
-                    ability_name=matched_action,
+                    ability_name=resolved_action_name,
                     input_files=input_files,
                     response_payload=response,
                     raw_result_summary=reply,
@@ -1618,7 +1769,7 @@ async def chat(request: Request) -> dict:
                 logger.info(
                     "Attachment skill executed: skill=%s action=%s success=%s elapsed_ms=%.2f summary=%s",
                     matched_skill,
-                    matched_action,
+                    resolved_action_name,
                     skill_result.success,
                     (time.perf_counter() - started) * 1000,
                     (skill_result.summary or "")[:160],
@@ -1657,7 +1808,7 @@ async def chat(request: Request) -> dict:
         task, _ = _start_task_trace(
             user_id=resolved_user_id,
             conversation_id=resolved_session_id,
-            intent="predict_methanol_concentration",
+            intent="table_file_analysis",
             input_message=effective_message,
             input_files=input_files,
         )
@@ -2146,7 +2297,7 @@ async def analyze_file(
     integration_time: str | None = Form(default=None),
     remarks: str | None = Form(default=None),
 ) -> dict:
-    """上传文件后，通过 Agent 工具链完成分析。CSV 走光谱分析，其它文件走通用文本分析。"""
+    """上传文件后，通过 Agent 工具链完成分析。表格文件会在 Raman 与普通数据分析之间自动分流。"""
     resolved_session_id = _ensure_session_id(conversation_id or session_id)
     save_path = await _save_uploaded_attachment(file)
     experiment_metadata = {
@@ -2158,11 +2309,12 @@ async def analyze_file(
         "integration_time": integration_time,
         "remarks": remarks,
     }
-    if save_path.suffix.lower() != ".csv":
+    if not _is_table_file_suffix(save_path.suffix.lower()):
         matched_skill, matched_action, route_info = _select_skill_route(
             message,
             has_file=True,
             file_suffix=save_path.suffix.lower(),
+            file_path=save_path,
         )
         if matched_skill is not None and matched_action is not None:
             task_type = _infer_document_task_type(message, file_suffix=save_path.suffix.lower())
@@ -2189,15 +2341,33 @@ async def analyze_file(
                 message=message,
                 original_message=message,
             )
-            reply = str(skill_result.data.get("reply_text") or skill_result.summary or "文档 Skill 执行完成。")
-            result_kind = "prompt_only_skill" if matched_skill_mode == "prompt_only" else _resolve_result_kind(matched_skill, matched_action)
+            resolved_action_name = str(skill_result.action_name or skill_result.data.get("action") or matched_action or "").strip() or matched_action
+            is_image_skill = matched_skill == "image-router-skill"
+            reply = str(
+                skill_result.data.get("analysis_markdown")
+                or skill_result.data.get("reply_text")
+                or skill_result.summary
+                or ("图片分析完成。" if is_image_skill else "文档 Skill 执行完成。")
+            )
+            if is_image_skill and not skill_result.success and any("当前已禁用" in str(item) for item in (skill_result.errors or [])):
+                reply = "当前已识别为图片文件，但 image-router-skill 当前被禁用。你可以在 Skill 管理页面重新启用它。"
+            result_kind = "prompt_only_skill" if matched_skill_mode == "prompt_only" else _resolve_result_kind(matched_skill, resolved_action_name)
             analysis_payload = _build_skill_analysis_payload(
                 matched_skill,
-                matched_action,
+                resolved_action_name,
                 skill_result.to_dict(),
                 message=reply,
                 save_path=str(save_path),
             )
+            tool_info = dict(skill_result.data.get("tool_info") or {})
+            if is_image_skill:
+                tool_info.setdefault("filename", save_path.name)
+                tool_info.setdefault("mode", "image_router")
+                tool_info.setdefault("source", "skill_execution")
+                tool_info.setdefault("skill", matched_skill)
+                tool_info.setdefault("action", resolved_action_name)
+                tool_info.setdefault("success", bool(skill_result.success))
+                tool_info.setdefault("image_type", str(skill_result.data.get("image_type") or "UNKNOWN_IMAGE"))
             response_payload = {
                 "success": skill_result.success,
                 "session_id": resolved_session_id,
@@ -2215,20 +2385,22 @@ async def analyze_file(
                 "warnings": [],
                 "attachment_info": {},
                 "skill_name": matched_skill,
-                "action_name": matched_action,
+                "action_name": resolved_action_name,
                 "skill_mode": matched_skill_mode,
                 "error_message": None if skill_result.success else "；".join(skill_result.errors) or reply,
                 "data": skill_result.data,
                 "errors": skill_result.errors,
+                "intent": "IMAGE_ANALYSIS" if is_image_skill else matched_action,
+                "tool_info": tool_info,
             }
             response_payload.update(
                 _build_chat_messages_payload(
                     session_id=resolved_session_id,
-                    role_type="text" if matched_skill_mode == "prompt_only" else ("analysis" if result_kind == "uploaded_skill" else "text"),
+                    role_type="text" if is_image_skill or matched_skill_mode == "prompt_only" else ("analysis" if result_kind == "uploaded_skill" else "text"),
                     content=reply,
-                    analysis=analysis_payload if matched_skill_mode == "prompt_only" or result_kind == "uploaded_skill" else None,
+                    analysis=analysis_payload if (matched_skill_mode == "prompt_only" or result_kind == "uploaded_skill") and not is_image_skill else None,
                     skill_name=matched_skill,
-                    action_name=matched_action,
+                    action_name=resolved_action_name,
                     result_kind=result_kind,
                     skill_mode=matched_skill_mode,
                 )
@@ -2243,7 +2415,7 @@ async def analyze_file(
             logger.info(
                 "Analyze-file attachment skill executed: skill=%s action=%s success=%s elapsed_ms=%.2f summary=%s",
                 matched_skill,
-                matched_action,
+                resolved_action_name,
                 skill_result.success,
                 (time.perf_counter() - started) * 1000,
                 (skill_result.summary or "")[:160],
@@ -2258,6 +2430,43 @@ async def analyze_file(
             debug=False,
         )
         append_message(resolved_session_id, "assistant", response_payload.get("reply", ""))
+        session_analysis = _build_session_analysis_payload(response_payload, resolved_session_id)
+        update_session(resolved_session_id, "last_analysis", session_analysis)
+        update_session(resolved_session_id, "last_file", response_payload.get("saved_file"))
+        update_session(resolved_session_id, "last_report", response_payload.get("report"))
+        _apply_task_state_from_response(resolved_session_id, response_payload)
+        return response_payload
+    _csv_route_skill, _csv_route_action, csv_route_info = _select_skill_route(
+        message,
+        has_file=True,
+        file_suffix=save_path.suffix.lower(),
+        file_path=save_path,
+    )
+    if csv_route_info and csv_route_info.get("route") in {"data_analysis_missing_skill", "image_router_missing_skill"}:
+        response_payload = _build_no_matching_file_skill_response(
+            session_id=resolved_session_id,
+            save_path=save_path,
+            message=message,
+            file_suffix=save_path.suffix.lower(),
+            route_info=csv_route_info,
+            debug=False,
+        )
+        append_message(resolved_session_id, "assistant", response_payload.get("reply", ""))
+        session_analysis = _build_session_analysis_payload(response_payload, resolved_session_id)
+        update_session(resolved_session_id, "last_analysis", session_analysis)
+        update_session(resolved_session_id, "last_file", response_payload.get("saved_file"))
+        update_session(resolved_session_id, "last_report", response_payload.get("report"))
+        _apply_task_state_from_response(resolved_session_id, response_payload)
+        return response_payload
+    if _csv_route_skill != "raman_spectroscopy_skill":
+        response_payload = _analyze_uploaded_file_with_skills(
+            save_path=save_path,
+            message=message,
+            session_id=resolved_session_id,
+            metadata=experiment_metadata,
+            debug=False,
+        )
+        append_message(resolved_session_id, "assistant", response_payload.get("reply") or response_payload.get("llm_explanation") or "")
         session_analysis = _build_session_analysis_payload(response_payload, resolved_session_id)
         update_session(resolved_session_id, "last_analysis", session_analysis)
         update_session(resolved_session_id, "last_file", response_payload.get("saved_file"))

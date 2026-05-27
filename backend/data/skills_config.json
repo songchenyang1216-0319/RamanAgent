@@ -15,6 +15,31 @@
         "generate_markdown_report": true
       }
     },
+    "image-router-skill": {
+      "enabled": true,
+      "actions": {
+        "classify_image_type": true,
+        "analyze_raman_spectrum_image": true,
+        "analyze_general_image": true,
+        "analyze_screenshot": true,
+        "analyze_chart_or_figure": true,
+        "ocr_extract_text": true,
+        "image_quality_check": true
+      }
+    },
+    "data-analysis-skill": {
+      "enabled": true,
+      "actions": {
+        "inspect_table": true,
+        "summarize_table": true,
+        "missing_value_check": true,
+        "basic_statistics": true,
+        "categorical_summary": true,
+        "chart_suggestion": true,
+        "simple_query_table": true,
+        "export_clean_preview": true
+      }
+    },
     "agent_system_skill": {
       "enabled": true,
       "actions": {

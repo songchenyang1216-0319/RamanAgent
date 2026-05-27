@@ -121,12 +121,18 @@ def build_general_chat_local_reply(message: str, system_context: dict | None = N
         )
 
     if resolved_intent == "capability_intro":
+        if _contains_any(message, ("是不是只能回答拉曼问题", "只能回答拉曼问题", "只能回答 Raman 问题")):
+            return (
+                "不只。RamanAgent 当然保留了拉曼、甲醇和 CSV 光谱分析能力，"
+                "但我也能做基础聊天、文档处理、联网搜索、大模型切换、Workspace 和 Skill 管理。"
+                f"{f'当前 Raman 业务模型版本是 {current_model}。' if current_model else ''}"
+            )
         return _pick_variant(
             message,
             (
-                f"我是一个多功能 Agent 工作台，可以普通聊天、处理文件、调用 Skill，也能通过 Raman 专业 Skill 做光谱分析。{f'当前 Raman 业务模型版本是 {current_model}。' if current_model else ''}",
-                f"我是通用 Agent 工作台里的助手。日常聊天、技术解释、文件处理、联网搜索和 Raman 光谱分析都可以接；Raman 只是其中一个专业 Skill。{f'当前 Raman 业务模型版本是 {current_model}。' if current_model else ''}",
-                f"你可以把我当成一个会聊天、会调用工具的 Agent 工作台。需要普通交流时直接问；需要文件或 Raman 分析时上传文件即可。{f'当前系统记录的 Raman 模型版本是 {current_model}。' if current_model else ''}",
+                f"我是 RamanAgent，一个多功能助手，能普通聊天、处理文档、联网搜索、切换大模型、管理 Workspace 和 Skill，也能做拉曼光谱和甲醇分析。{f'当前 Raman 业务模型版本是 {current_model}。' if current_model else ''}",
+                f"你可以把我当成 RamanAgent 的通用工作台，我既能聊天，也能帮你处理文档、搜索网络、管理 Workspace 和 Skill，还能做拉曼与甲醇分析。{f'当前 Raman 业务模型版本是 {current_model}。' if current_model else ''}",
+                f"我是 RamanAgent，定位是一个多技能助手，普通聊天、文档处理、联网搜索、大模型切换、Workspace 和 Skill 管理，以及拉曼光谱和甲醇分析，我都可以接。{f'当前系统记录的 Raman 模型版本是 {current_model}。' if current_model else ''}",
             ),
         )
 
@@ -187,6 +193,7 @@ def build_general_chat_system_prompt(system_context: dict | None = None) -> str:
         "你既可以进行普通对话，也可以帮助用户处理文件、理解项目结构、查看系统状态，以及在需要时调用 Raman 光谱处理能力。"
         "默认用中文回答，语气自然、清晰、友好，像一个靠谱的科研工程助手。"
         "对于寒暄、感谢、能力范围、轻松闲聊等普通问题，请用 1 到 3 句自然回应，不要套固定模板。"
+        "当用户问“你是谁”“你能做什么”“你和普通大模型有什么区别”时，请自然说明自己是 RamanAgent，并概括普通聊天、文档处理、联网搜索、大模型切换、Workspace、Skill 管理，以及拉曼和甲醇分析能力，不要把自己说成只会 Raman。"
         "如果用户表现出疲惫、烦躁或压力大，请给出简短、友好的安慰，然后再提供继续帮助的选项。"
         "你可以回答通用问题，但不要编造不存在的工具、文件、分析结果或系统状态。"
         "用户问 Raman、光谱、机器学习、项目开发时，可以做专业解释。"

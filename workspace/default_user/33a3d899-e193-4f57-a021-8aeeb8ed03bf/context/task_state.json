@@ -140,10 +140,661 @@
       "created_at": "2026-05-27T14:41:55",
       "updated_at": "2026-05-27T14:41:55",
       "error_message": null
+    },
+    {
+      "task_id": "86c518ca2f7544e0b3f0e242c7443420",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "classify_image_type",
+      "status": "success",
+      "input_message": "分析一下这张图片，主要是在说明什么",
+      "input_files": [
+        {
+          "file_id": "屏幕截图_2026-04-06_200522_97a24482",
+          "filename": "屏幕截图_2026-04-06_200522_97a24482.png",
+          "original_name": "屏幕截图 2026-04-06 200522.png",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\屏幕截图_2026-04-06_200522_97a24482.png",
+          "workspace_relative_path": "uploads\\屏幕截图_2026-04-06_200522_97a24482.png",
+          "mime_type": "image/png",
+          "size": 240991,
+          "kind": "upload",
+          "updated_at": "2026-05-27T15:54:22"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "屏幕截图_2026-04-06_200522_97a24482.png",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\屏幕截图_2026-04-06_200522_97a24482.png"
+        }
+      ],
+      "selected_skill": "image-router-skill",
+      "selected_ability": "analyze_general_image",
+      "created_at": "2026-05-27T15:54:22",
+      "updated_at": "2026-05-27T15:54:23",
+      "error_message": null
+    },
+    {
+      "task_id": "98aaa41528854826afec547f86cabf4d",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "classify_image_type",
+      "status": "success",
+      "input_message": "分析一下这个图片",
+      "input_files": [
+        {
+          "file_id": "屏幕截图_2026-04-06_200522_cc3ad8df",
+          "filename": "屏幕截图_2026-04-06_200522_cc3ad8df.png",
+          "original_name": "屏幕截图 2026-04-06 200522.png",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\屏幕截图_2026-04-06_200522_cc3ad8df.png",
+          "workspace_relative_path": "uploads\\屏幕截图_2026-04-06_200522_cc3ad8df.png",
+          "mime_type": "image/png",
+          "size": 240991,
+          "kind": "upload",
+          "updated_at": "2026-05-27T15:57:29"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "屏幕截图_2026-04-06_200522_cc3ad8df.png",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\屏幕截图_2026-04-06_200522_cc3ad8df.png"
+        }
+      ],
+      "selected_skill": "image-router-skill",
+      "selected_ability": "analyze_general_image",
+      "created_at": "2026-05-27T15:57:29",
+      "updated_at": "2026-05-27T15:57:29",
+      "error_message": null
+    },
+    {
+      "task_id": "fddb933ef4384548bf212dc21aa1fe06",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "classify_image_type",
+      "status": "success",
+      "input_message": "分析这个图片",
+      "input_files": [
+        {
+          "file_id": "屏幕截图_2026-04-06_200522_d2e046e4",
+          "filename": "屏幕截图_2026-04-06_200522_d2e046e4.png",
+          "original_name": "屏幕截图 2026-04-06 200522.png",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\屏幕截图_2026-04-06_200522_d2e046e4.png",
+          "workspace_relative_path": "uploads\\屏幕截图_2026-04-06_200522_d2e046e4.png",
+          "mime_type": "image/png",
+          "size": 240991,
+          "kind": "upload",
+          "updated_at": "2026-05-27T16:01:23"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "屏幕截图_2026-04-06_200522_d2e046e4.png",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\屏幕截图_2026-04-06_200522_d2e046e4.png"
+        }
+      ],
+      "selected_skill": "image-router-skill",
+      "selected_ability": "analyze_general_image",
+      "created_at": "2026-05-27T16:01:23",
+      "updated_at": "2026-05-27T16:01:24",
+      "error_message": null
+    },
+    {
+      "task_id": "fe4fa18b80e74843adb87f3489ec898e",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "classify_image_type",
+      "status": "success",
+      "input_message": "分析这个",
+      "input_files": [
+        {
+          "file_id": "屏幕截图_2026-04-06_200522_112ba065",
+          "filename": "屏幕截图_2026-04-06_200522_112ba065.png",
+          "original_name": "屏幕截图 2026-04-06 200522.png",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\屏幕截图_2026-04-06_200522_112ba065.png",
+          "workspace_relative_path": "uploads\\屏幕截图_2026-04-06_200522_112ba065.png",
+          "mime_type": "image/png",
+          "size": 240991,
+          "kind": "upload",
+          "updated_at": "2026-05-27T16:08:12"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "屏幕截图_2026-04-06_200522_112ba065.png",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\屏幕截图_2026-04-06_200522_112ba065.png"
+        }
+      ],
+      "selected_skill": "image-router-skill",
+      "selected_ability": "analyze_general_image",
+      "created_at": "2026-05-27T16:08:12",
+      "updated_at": "2026-05-27T16:08:13",
+      "error_message": null
+    },
+    {
+      "task_id": "b98c0ada926f468d9d43ef17ca5b62f9",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "classify_image_type",
+      "status": "success",
+      "input_message": "分析一下这个图片是做什么的",
+      "input_files": [
+        {
+          "file_id": "屏幕截图_2026-04-06_200522_07725550",
+          "filename": "屏幕截图_2026-04-06_200522_07725550.png",
+          "original_name": "屏幕截图 2026-04-06 200522.png",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\屏幕截图_2026-04-06_200522_07725550.png",
+          "workspace_relative_path": "uploads\\屏幕截图_2026-04-06_200522_07725550.png",
+          "mime_type": "image/png",
+          "size": 240991,
+          "kind": "upload",
+          "updated_at": "2026-05-27T16:13:42"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "屏幕截图_2026-04-06_200522_07725550.png",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\屏幕截图_2026-04-06_200522_07725550.png"
+        }
+      ],
+      "selected_skill": "image-router-skill",
+      "selected_ability": "analyze_general_image",
+      "created_at": "2026-05-27T16:13:42",
+      "updated_at": "2026-05-27T16:14:54",
+      "error_message": null
+    },
+    {
+      "task_id": "466f4674e8ed46ed96734560b7a531c9",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "web_search",
+      "status": "success",
+      "input_message": "我现在使用的是哪个平台的哪个模型？",
+      "input_files": [],
+      "output_files": [],
+      "selected_skill": "web-search",
+      "selected_ability": "search",
+      "created_at": "2026-05-27T16:23:23",
+      "updated_at": "2026-05-27T16:23:24",
+      "error_message": null
+    },
+    {
+      "task_id": "6890be96411240cd8430d08ada36ed6d",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "classify_image_type",
+      "status": "success",
+      "input_message": "分析一下这个图片",
+      "input_files": [
+        {
+          "file_id": "屏幕截图_2026-04-10_172140_9c3ab61e",
+          "filename": "屏幕截图_2026-04-10_172140_9c3ab61e.png",
+          "original_name": "屏幕截图 2026-04-10 172140.png",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\屏幕截图_2026-04-10_172140_9c3ab61e.png",
+          "workspace_relative_path": "uploads\\屏幕截图_2026-04-10_172140_9c3ab61e.png",
+          "mime_type": "image/png",
+          "size": 43311,
+          "kind": "upload",
+          "updated_at": "2026-05-27T16:24:13"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "屏幕截图_2026-04-10_172140_9c3ab61e.png",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\屏幕截图_2026-04-10_172140_9c3ab61e.png"
+        }
+      ],
+      "selected_skill": "image-router-skill",
+      "selected_ability": "analyze_general_image",
+      "created_at": "2026-05-27T16:24:13",
+      "updated_at": "2026-05-27T16:24:47",
+      "error_message": null
+    },
+    {
+      "task_id": "243f0a16cc3043df9da1b1f2dd2fc3da",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "predict_methanol_concentration",
+      "status": "success",
+      "input_message": "分析一下这个光谱",
+      "input_files": [
+        {
+          "file_id": "甲醇-0.3461-1_251c73d0",
+          "filename": "甲醇-0.3461-1_251c73d0.csv",
+          "original_name": "甲醇-0.3461-1.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\甲醇-0.3461-1_251c73d0.csv",
+          "workspace_relative_path": "uploads\\甲醇-0.3461-1_251c73d0.csv",
+          "mime_type": "application/vnd.ms-excel",
+          "size": 15700,
+          "kind": "upload",
+          "updated_at": "2026-05-27T16:30:20"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "甲醇-0.3461-1_251c73d0.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\甲醇-0.3461-1_251c73d0.csv"
+        },
+        {
+          "filename": "20260527_163059_0.3461-1_251c73d0_pred_0_492_8cd2a9.md",
+          "path": "outputs/reports/20260527_163059_0.3461-1_251c73d0_pred_0_492_8cd2a9.md"
+        },
+        {
+          "filename": "20260527_163059_0.3461-1_251c73d0_pred_0_492_8cd2a9.md",
+          "path": "outputs/reports/20260527_163059_0.3461-1_251c73d0_pred_0_492_8cd2a9.md"
+        },
+        {
+          "filename": "20260527_163059_0.3461-1_251c73d0_pred_0_492_8cd2a9.html",
+          "path": "outputs/reports/20260527_163059_0.3461-1_251c73d0_pred_0_492_8cd2a9.html"
+        },
+        {
+          "filename": "甲醇-0.3461-1_251c73d0_raw.png",
+          "path": "/static/figures/甲醇-0.3461-1_251c73d0_raw.png"
+        },
+        {
+          "filename": "甲醇-0.3461-1_251c73d0_preprocessed.png",
+          "path": "/static/figures/甲醇-0.3461-1_251c73d0_preprocessed.png"
+        },
+        {
+          "filename": "甲醇-0.3461-1_251c73d0_cdae.png",
+          "path": "/static/figures/甲醇-0.3461-1_251c73d0_cdae.png"
+        },
+        {
+          "filename": "甲醇-0.3461-1_251c73d0_final.png",
+          "path": "/static/figures/甲醇-0.3461-1_251c73d0_final.png"
+        }
+      ],
+      "selected_skill": "raman_spectroscopy_skill",
+      "selected_ability": "predict_methanol_concentration",
+      "created_at": "2026-05-27T16:30:20",
+      "updated_at": "2026-05-27T16:30:59",
+      "error_message": null
+    },
+    {
+      "task_id": "182ecc95009f45808862af2dfa8fa153",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "classify_image_type",
+      "status": "success",
+      "input_message": "分析一下这个图片",
+      "input_files": [
+        {
+          "file_id": "ea35f908-b503-45a1-92ed-b09cadf966ca_9bb963bc",
+          "filename": "ea35f908-b503-45a1-92ed-b09cadf966ca_9bb963bc.png",
+          "original_name": "ea35f908-b503-45a1-92ed-b09cadf966ca.png",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\ea35f908-b503-45a1-92ed-b09cadf966ca_9bb963bc.png",
+          "workspace_relative_path": "uploads\\ea35f908-b503-45a1-92ed-b09cadf966ca_9bb963bc.png",
+          "mime_type": "image/png",
+          "size": 80161,
+          "kind": "upload",
+          "updated_at": "2026-05-27T16:32:57"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "ea35f908-b503-45a1-92ed-b09cadf966ca_9bb963bc.png",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\ea35f908-b503-45a1-92ed-b09cadf966ca_9bb963bc.png"
+        }
+      ],
+      "selected_skill": "image-router-skill",
+      "selected_ability": "analyze_general_image",
+      "created_at": "2026-05-27T16:32:57",
+      "updated_at": "2026-05-27T16:32:57",
+      "error_message": null
+    },
+    {
+      "task_id": "db269d4a1ad24017a114b60a3092f9fe",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "classify_image_type",
+      "status": "success",
+      "input_message": "分析这个图片",
+      "input_files": [
+        {
+          "file_id": "ea35f908-b503-45a1-92ed-b09cadf966ca_e08d662d",
+          "filename": "ea35f908-b503-45a1-92ed-b09cadf966ca_e08d662d.png",
+          "original_name": "ea35f908-b503-45a1-92ed-b09cadf966ca.png",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\ea35f908-b503-45a1-92ed-b09cadf966ca_e08d662d.png",
+          "workspace_relative_path": "uploads\\ea35f908-b503-45a1-92ed-b09cadf966ca_e08d662d.png",
+          "mime_type": "image/png",
+          "size": 80161,
+          "kind": "upload",
+          "updated_at": "2026-05-27T16:34:09"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "ea35f908-b503-45a1-92ed-b09cadf966ca_e08d662d.png",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\ea35f908-b503-45a1-92ed-b09cadf966ca_e08d662d.png"
+        }
+      ],
+      "selected_skill": "image-router-skill",
+      "selected_ability": "analyze_general_image",
+      "created_at": "2026-05-27T16:34:09",
+      "updated_at": "2026-05-27T16:34:09",
+      "error_message": null
+    },
+    {
+      "task_id": "8812b41186744d2bbf6cc53da0aec000",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "classify_image_type",
+      "status": "success",
+      "input_message": "分析一下这个图片",
+      "input_files": [
+        {
+          "file_id": "ea35f908-b503-45a1-92ed-b09cadf966ca_8ca5cb0a",
+          "filename": "ea35f908-b503-45a1-92ed-b09cadf966ca_8ca5cb0a.png",
+          "original_name": "ea35f908-b503-45a1-92ed-b09cadf966ca.png",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\ea35f908-b503-45a1-92ed-b09cadf966ca_8ca5cb0a.png",
+          "workspace_relative_path": "uploads\\ea35f908-b503-45a1-92ed-b09cadf966ca_8ca5cb0a.png",
+          "mime_type": "image/png",
+          "size": 80161,
+          "kind": "upload",
+          "updated_at": "2026-05-27T16:39:16"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "ea35f908-b503-45a1-92ed-b09cadf966ca_8ca5cb0a.png",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\ea35f908-b503-45a1-92ed-b09cadf966ca_8ca5cb0a.png"
+        }
+      ],
+      "selected_skill": "image-router-skill",
+      "selected_ability": "analyze_general_image",
+      "created_at": "2026-05-27T16:39:16",
+      "updated_at": "2026-05-27T16:39:35",
+      "error_message": null
+    },
+    {
+      "task_id": "deccc86ffa6748fbb000f3227dd4cb53",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "table_file_analysis",
+      "status": "success",
+      "input_message": "请读取我上传的 CSV 文件，告诉我它有多少行、多少列，并列出所有字段名。",
+      "input_files": [
+        {
+          "file_id": "test_data_medium_no_raman_19a91ec5",
+          "filename": "test_data_medium_no_raman_19a91ec5.csv",
+          "original_name": "test_data_medium_no_raman.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_19a91ec5.csv",
+          "workspace_relative_path": "uploads\\test_data_medium_no_raman_19a91ec5.csv",
+          "mime_type": "application/vnd.ms-excel",
+          "size": 429315,
+          "kind": "upload",
+          "updated_at": "2026-05-27T17:33:16"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "test_data_medium_no_raman_19a91ec5.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_19a91ec5.csv"
+        }
+      ],
+      "selected_skill": "data-analysis-skill",
+      "selected_ability": "inspect_table",
+      "created_at": "2026-05-27T17:33:16",
+      "updated_at": "2026-05-27T17:33:26",
+      "error_message": null
+    },
+    {
+      "task_id": "f8536f62fb71486b85738b541013c0a7",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "table_file_analysis",
+      "status": "success",
+      "input_message": "这个文件主要记录的是什么内容？",
+      "input_files": [
+        {
+          "file_id": "test_data_medium_no_raman_42adbbea",
+          "filename": "test_data_medium_no_raman_42adbbea.csv",
+          "original_name": "test_data_medium_no_raman.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_42adbbea.csv",
+          "workspace_relative_path": "uploads\\test_data_medium_no_raman_42adbbea.csv",
+          "mime_type": "application/vnd.ms-excel",
+          "size": 429315,
+          "kind": "upload",
+          "updated_at": "2026-05-27T17:34:28"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "test_data_medium_no_raman_42adbbea.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_42adbbea.csv"
+        }
+      ],
+      "selected_skill": "data-analysis-skill",
+      "selected_ability": "summarize_table",
+      "created_at": "2026-05-27T17:34:28",
+      "updated_at": "2026-05-27T17:34:29",
+      "error_message": null
+    },
+    {
+      "task_id": "be3807d7336e4b8fac25a80a2958bc53",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "table_file_analysis",
+      "status": "success",
+      "input_message": "请统计这个文件中有哪些省份和城市，看看中文有没有乱码。",
+      "input_files": [
+        {
+          "file_id": "test_data_medium_no_raman_8bf0e37e",
+          "filename": "test_data_medium_no_raman_8bf0e37e.csv",
+          "original_name": "test_data_medium_no_raman.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_8bf0e37e.csv",
+          "workspace_relative_path": "uploads\\test_data_medium_no_raman_8bf0e37e.csv",
+          "mime_type": "application/vnd.ms-excel",
+          "size": 429315,
+          "kind": "upload",
+          "updated_at": "2026-05-27T17:38:32"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "test_data_medium_no_raman_8bf0e37e.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_8bf0e37e.csv"
+        }
+      ],
+      "selected_skill": "data-analysis-skill",
+      "selected_ability": "basic_statistics",
+      "created_at": "2026-05-27T17:38:32",
+      "updated_at": "2026-05-27T17:38:40",
+      "error_message": null
+    },
+    {
+      "task_id": "8e0f0ef20af94adf93a9f7e62f06da44",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "table_file_analysis",
+      "status": "success",
+      "input_message": "请检查这个 CSV 中是否存在缺失值，哪些字段有缺失，缺失了多少条？",
+      "input_files": [
+        {
+          "file_id": "test_data_medium_no_raman_f7d9d812",
+          "filename": "test_data_medium_no_raman_f7d9d812.csv",
+          "original_name": "test_data_medium_no_raman.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_f7d9d812.csv",
+          "workspace_relative_path": "uploads\\test_data_medium_no_raman_f7d9d812.csv",
+          "mime_type": "application/vnd.ms-excel",
+          "size": 429315,
+          "kind": "upload",
+          "updated_at": "2026-05-27T17:39:37"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "test_data_medium_no_raman_f7d9d812.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_f7d9d812.csv"
+        }
+      ],
+      "selected_skill": "data-analysis-skill",
+      "selected_ability": "missing_value_check",
+      "created_at": "2026-05-27T17:39:37",
+      "updated_at": "2026-05-27T17:39:38",
+      "error_message": null
+    },
+    {
+      "task_id": "7015d9d41cba46ccb9cdb8431f358d24",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "table_file_analysis",
+      "status": "success",
+      "input_message": "请检查这个 CSV 中是否存在缺失值，哪些字段有缺失，缺失了多少条？",
+      "input_files": [
+        {
+          "file_id": "test_data_medium_no_raman_d17abfb0",
+          "filename": "test_data_medium_no_raman_d17abfb0.csv",
+          "original_name": "test_data_medium_no_raman.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_d17abfb0.csv",
+          "workspace_relative_path": "uploads\\test_data_medium_no_raman_d17abfb0.csv",
+          "mime_type": "application/vnd.ms-excel",
+          "size": 429315,
+          "kind": "upload",
+          "updated_at": "2026-05-27T17:40:10"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "test_data_medium_no_raman_d17abfb0.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_d17abfb0.csv"
+        }
+      ],
+      "selected_skill": "data-analysis-skill",
+      "selected_ability": "missing_value_check",
+      "created_at": "2026-05-27T17:40:10",
+      "updated_at": "2026-05-27T17:40:18",
+      "error_message": null
+    },
+    {
+      "task_id": "fede89ab78f24374b5da7829c289f798",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "table_file_analysis",
+      "status": "success",
+      "input_message": "请读取我上传的 CSV 文件，告诉我它有多少行、多少列，并列出所有字段名。",
+      "input_files": [
+        {
+          "file_id": "test_data_medium_no_raman_c3bc5996",
+          "filename": "test_data_medium_no_raman_c3bc5996.csv",
+          "original_name": "test_data_medium_no_raman.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_c3bc5996.csv",
+          "workspace_relative_path": "uploads\\test_data_medium_no_raman_c3bc5996.csv",
+          "mime_type": "application/vnd.ms-excel",
+          "size": 429315,
+          "kind": "upload",
+          "updated_at": "2026-05-27T17:40:56"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "test_data_medium_no_raman_c3bc5996.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_c3bc5996.csv"
+        }
+      ],
+      "selected_skill": "data-analysis-skill",
+      "selected_ability": "inspect_table",
+      "created_at": "2026-05-27T17:40:56",
+      "updated_at": "2026-05-27T17:40:57",
+      "error_message": null
+    },
+    {
+      "task_id": "6d6c551c50d44ac2aefab6faaa7c01d3",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "table_file_analysis",
+      "status": "success",
+      "input_message": "告诉我这份 CSV 有多少行多少列",
+      "input_files": [
+        {
+          "file_id": "test_data_medium_no_raman_cb7cb528",
+          "filename": "test_data_medium_no_raman_cb7cb528.csv",
+          "original_name": "test_data_medium_no_raman.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_cb7cb528.csv",
+          "workspace_relative_path": "uploads\\test_data_medium_no_raman_cb7cb528.csv",
+          "mime_type": "application/vnd.ms-excel",
+          "size": 429315,
+          "kind": "upload",
+          "updated_at": "2026-05-27T17:46:54"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "test_data_medium_no_raman_cb7cb528.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_cb7cb528.csv"
+        }
+      ],
+      "selected_skill": "data-analysis-skill",
+      "selected_ability": "summarize_table",
+      "created_at": "2026-05-27T17:46:54",
+      "updated_at": "2026-05-27T17:47:03",
+      "error_message": null
+    },
+    {
+      "task_id": "54fe502556de4ba285635c0e3865bf20",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "table_file_analysis",
+      "status": "success",
+      "input_message": "帮我检查哪些字段有缺失值",
+      "input_files": [
+        {
+          "file_id": "test_data_medium_no_raman_c3326788",
+          "filename": "test_data_medium_no_raman_c3326788.csv",
+          "original_name": "test_data_medium_no_raman.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_c3326788.csv",
+          "workspace_relative_path": "uploads\\test_data_medium_no_raman_c3326788.csv",
+          "mime_type": "application/vnd.ms-excel",
+          "size": 429315,
+          "kind": "upload",
+          "updated_at": "2026-05-27T17:47:16"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "test_data_medium_no_raman_c3326788.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_c3326788.csv"
+        }
+      ],
+      "selected_skill": "data-analysis-skill",
+      "selected_ability": "missing_value_check",
+      "created_at": "2026-05-27T17:47:17",
+      "updated_at": "2026-05-27T17:47:18",
+      "error_message": null
+    },
+    {
+      "task_id": "8aa693896f384e788e925ca8ab1d3fb0",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "continue_active_file_analysis",
+      "status": "success",
+      "input_message": "这个文件主要记录的是什么内容",
+      "input_files": [
+        {
+          "file_id": "test_data_medium_no_raman_c3326788",
+          "filename": "test_data_medium_no_raman_c3326788.csv",
+          "original_name": "test_data_medium_no_raman.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_c3326788.csv",
+          "workspace_relative_path": "uploads\\test_data_medium_no_raman_c3326788.csv",
+          "mime_type": "application/vnd.ms-excel",
+          "size": 429315,
+          "kind": "upload",
+          "updated_at": "2026-05-27T17:47:16"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "test_data_medium_no_raman_c3326788.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_c3326788.csv"
+        }
+      ],
+      "selected_skill": "data-analysis-skill",
+      "selected_ability": "simple_query_table",
+      "created_at": "2026-05-27T17:47:37",
+      "updated_at": "2026-05-27T17:47:38",
+      "error_message": null
     }
   ],
-  "current_task_id": "0ca7e53341194f3fa1c483845a8214c1",
-  "updated_at": "2026-05-27T14:41:55",
+  "current_task_id": "8aa693896f384e788e925ca8ab1d3fb0",
+  "updated_at": "2026-05-27T17:47:38",
   "selected_provider": "sensenova",
   "selected_model": "deepseek-v4-flash"
 }
