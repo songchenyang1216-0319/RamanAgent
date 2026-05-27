@@ -21,8 +21,12 @@
             <strong id="backendStatus">检查中</strong>
           </div>
           <div class="status-card">
-            <span>当前模型</span>
-            <strong id="topModelVersion">加载中</strong>
+            <span>当前大模型</span>
+            <strong id="topLlmModel">加载中</strong>
+          </div>
+          <div class="status-card">
+            <span>Raman 模型</span>
+            <strong id="topRamanModel">加载中</strong>
           </div>
           <div class="status-card">
             <span>模型文件</span>
@@ -40,12 +44,16 @@
             <div id="modelListPopover" class="model-list-popover hidden" aria-hidden="true">
               <div class="model-list-head">
                 <strong>可用模型</strong>
-                <button id="closeModelListBtn" type="button" class="mini-ghost-button">关闭</button>
+                <div class="model-list-head-actions">
+                  <button id="refreshModelListBtn" type="button" class="mini-ghost-button">刷新</button>
+                  <button id="closeModelListBtn" type="button" class="mini-ghost-button">关闭</button>
+                </div>
               </div>
               <div id="modelListBody" class="model-list-body"></div>
             </div>
           </div>
           <button id="recentExperimentBtn" type="button" class="pill-button" data-question="最近记录">最近记录</button>
+          <button id="workspaceButton" type="button" class="pill-button">工作区</button>
           <button id="skillsManageBtn" type="button" class="pill-button">Skills 管理</button>
           <button id="refreshDashboardBtn" type="button" class="pill-button">刷新</button>
           <label class="debug-switch compact">
@@ -103,6 +111,23 @@
       </div>
       <div id="skillsPanelStats" class="skills-panel-stats"></div>
       <div id="skillsPanelBody" class="skills-panel-body"></div>
+    </aside>
+  </div>
+
+  <div id="workspacePanel" class="workspace-panel hidden" aria-hidden="true">
+    <div id="workspacePanelBackdrop" class="workspace-panel-backdrop"></div>
+    <aside class="workspace-panel-drawer" role="dialog" aria-modal="true" aria-labelledby="workspacePanelTitle">
+      <div class="workspace-panel-header">
+        <div>
+          <p class="brand-small brand-small-panel">Workspace</p>
+          <h2 id="workspacePanelTitle">当前会话工作区</h2>
+        </div>
+        <button id="closeWorkspacePanelBtn" type="button" class="mini-ghost-button">关闭</button>
+      </div>
+      <div class="workspace-panel-toolbar">
+        <button id="refreshWorkspaceBtn" type="button" class="pill-button small">刷新工作区</button>
+      </div>
+      <div id="workspacePanelBody" class="workspace-panel-body"></div>
     </aside>
   </div>
 

@@ -12,6 +12,8 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from backend.agent.agent_service import RamanAgentService
+from backend.agent.tools.report_tool import explain_result_tool, generate_report_tool
+from backend.agent.tools.spectral_tools.spectral_summary_tool import analyze_spectrum_professionally
 from backend.agent.session_store import (
     append_message,
     build_task_state_response,
@@ -33,13 +35,42 @@ from backend.skills.registry import (
 )
 from backend.skills.upload_service import delete_uploaded_skill, list_uploaded_skills, save_uploaded_skill
 from backend.services.history_service import save_analysis_history
+from backend.api.methanol_api import build_figure_web_urls, build_report_web_urls
+from backend.services.model_registry_service import ModelRegistryService
+from backend.services.llm_service import LLMService
+from backend.services.methanol_service import reset_predictor_cache
+from backend.services.task_trace_manager import TaskTraceManager
+from backend.services.user_memory_manager import UserMemoryManager
+from backend.services.workspace_manager import DEFAULT_USER_ID, WorkspaceManager
 from raman_core.methanol.config import OUTPUT_DIR, PROJECT_ROOT, ensure_dirs
 
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 service = RamanAgentService()
+model_registry_service = ModelRegistryService()
+workspace_manager = WorkspaceManager()
+user_memory_manager = UserMemoryManager()
+task_trace_manager = TaskTraceManager(workspace_manager=workspace_manager)
 UPLOAD_DIR = OUTPUT_DIR / "uploads"
 logger = logging.getLogger(__name__)
+
+
+def _llm_model_info(
+    user_id: str | None = None,
+    conversation_id: str | None = None,
+    provider_id: str | None = None,
+    model_id: str | None = None,
+) -> dict:
+    """返回当前生成回复所使用的大模型信息。"""
+    try:
+        return LLMService(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            provider_id=provider_id,
+            model_id=model_id,
+        ).get_current_model_info()
+    except Exception:
+        return {}
 
 
 def _normalize_skill_key(value: object) -> str:
@@ -51,7 +82,11 @@ class AgentChatRequest(BaseModel):
 
     message: str
     debug: bool = False
+    conversation_id: str | None = None
     session_id: str | None = None
+    user_id: str | None = None
+    provider_id: str | None = None
+    model_id: str | None = None
 
 
 class ToggleEnabledRequest(BaseModel):
@@ -125,10 +160,21 @@ def _sanitize_uploaded_filename(file_name: str) -> str:
     return stem
 
 
-async def _save_uploaded_attachment(file: UploadFile) -> Path:
-    """保存 Agent 上传的任意附件到 outputs/uploads。"""
+async def _save_uploaded_attachment(
+    file: UploadFile,
+    user_id: str | None = None,
+    conversation_id: str | None = None,
+) -> Path:
+    """保存 Agent 上传的任意附件；有 workspace 时优先保存到 workspace/uploads。"""
     if not file.filename:
         raise HTTPException(status_code=400, detail="未提供上传文件名。")
+
+    if conversation_id:
+        try:
+            info = await workspace_manager.save_upload_file(user_id or DEFAULT_USER_ID, conversation_id, file)
+            return PROJECT_ROOT / info["path"]
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     ensure_dirs()
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -140,6 +186,176 @@ async def _save_uploaded_attachment(file: UploadFile) -> Path:
         raise HTTPException(status_code=400, detail="上传文件为空。")
     target_path.write_bytes(content)
     return target_path
+
+
+def _workspace_path_payload(path: str | Path | None) -> dict | None:
+    if not path:
+        return None
+    raw = str(path)
+    name = Path(raw).name
+    return {
+        "filename": name,
+        "path": raw,
+    }
+
+
+def _workspace_input_files(user_id: str, conversation_id: str, save_path: Path | None = None) -> list[dict]:
+    active_files = workspace_manager.read_active_files(user_id, conversation_id)
+    if save_path is None:
+        return active_files[-5:]
+    save_name = save_path.name
+    matched = [item for item in active_files if item.get("filename") == save_name or item.get("path", "").endswith(save_name)]
+    return matched or [_workspace_path_payload(save_path) or {}]
+
+
+def _resolve_referenced_active_file(user_id: str, conversation_id: str, message: str) -> tuple[Path, dict] | None:
+    text = str(message or "")
+    if not any(marker in text for marker in ("刚才", "上次", "那个文件", "这个文件", "继续")):
+        return None
+    active_files = workspace_manager.read_active_files(user_id, conversation_id)
+    if not active_files:
+        return None
+    for item in reversed(active_files):
+        path = PROJECT_ROOT / str(item.get("path") or "")
+        try:
+            resolved = path.resolve()
+        except Exception:
+            continue
+        if PROJECT_ROOT.resolve() in resolved.parents and resolved.exists() and resolved.is_file():
+            return resolved, item
+    return None
+
+
+def _workspace_output_files(response_payload: dict) -> list[dict]:
+    output_files: list[dict] = []
+    for key in ("saved_file",):
+        item = _workspace_path_payload(response_payload.get(key))
+        if item:
+            output_files.append(item)
+    report = response_payload.get("report") or {}
+    if isinstance(report, dict):
+        for key in ("report_path", "report_markdown_path", "report_html_path"):
+            item = _workspace_path_payload(report.get(key))
+            if item:
+                output_files.append(item)
+    web_urls = response_payload.get("web_urls") or {}
+    if isinstance(web_urls, dict):
+        for value in (web_urls.get("figures") or {}).values() if isinstance(web_urls.get("figures"), dict) else []:
+            item = _workspace_path_payload(value)
+            if item:
+                output_files.append(item)
+    return output_files
+
+
+def _start_task_trace(
+    *,
+    user_id: str,
+    conversation_id: str,
+    intent: str,
+    input_message: str,
+    input_files: list[dict] | None = None,
+) -> tuple[dict, dict]:
+    task = task_trace_manager.create_task(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        intent=intent,
+        input_message=input_message,
+        input_files=input_files or [],
+    )
+    step = task_trace_manager.add_step(
+        task["task_id"],
+        "识别任务类型",
+        detail={"intent": intent},
+    )
+    task_trace_manager.finish_step(step["step_id"], detail={"intent": intent})
+    return task, step
+
+
+def _record_skill_trace(
+    *,
+    task_id: str,
+    skill_name: str,
+    ability_name: str | None,
+    input_files: list[dict] | None,
+    response_payload: dict,
+    raw_result_summary: str | None = None,
+) -> dict:
+    select_step = task_trace_manager.add_step(
+        task_id,
+        "选择 Skill",
+        detail={"skill_name": skill_name, "ability_name": ability_name},
+    )
+    task_trace_manager.finish_step(select_step["step_id"], detail={"skill_name": skill_name, "ability_name": ability_name})
+    run_step = task_trace_manager.add_step(
+        task_id,
+        "执行 Skill",
+        detail={"skill_name": skill_name, "ability_name": ability_name},
+    )
+    status = "success" if response_payload.get("success") else "failed"
+    error_message = response_payload.get("error_message") or response_payload.get("llm_error")
+    output_files = _workspace_output_files(response_payload)
+    task_trace_manager.finish_step(
+        run_step["step_id"],
+        status=status,
+        detail={"output_files": output_files},
+        error_message=error_message,
+    )
+    return task_trace_manager.record_skill_run(
+        task_id=task_id,
+        skill_name=skill_name,
+        ability_name=ability_name,
+        input_files=input_files or [],
+        output_files=output_files,
+        status=status,
+        error_message=error_message,
+        raw_result_summary=raw_result_summary or response_payload.get("reply") or response_payload.get("llm_explanation"),
+    )
+
+
+def _update_workspace_summary(user_id: str, conversation_id: str, user_message: str, assistant_reply: str) -> None:
+    existing = workspace_manager.read_context_summary(user_id, conversation_id).strip()
+    recent = f"- 用户：{str(user_message or '')[:160]}\n- 助手：{str(assistant_reply or '')[:240]}"
+    summary = (existing + "\n\n" + recent).strip() if existing else recent
+    workspace_manager.update_context_summary(user_id, conversation_id, summary[-4000:])
+
+
+def _finalize_workspace_response(
+    response_payload: dict,
+    *,
+    user_id: str,
+    conversation_id: str,
+    user_message: str,
+    assistant_reply: str,
+    task_id: str | None = None,
+) -> dict:
+    model_info = dict(response_payload.get("model_info") or response_payload.get("llm_model_info") or {})
+    if not model_info:
+        model_info = _llm_model_info(user_id=user_id, conversation_id=conversation_id)
+    if model_info:
+        response_payload.setdefault("provider_id", model_info.get("provider"))
+        response_payload.setdefault("model_id", model_info.get("model"))
+        response_payload.setdefault("model_info", model_info)
+    response_payload["conversation_id"] = conversation_id
+    response_payload["session_id"] = conversation_id
+    response_payload.setdefault("used_skill", bool(response_payload.get("skill_name")))
+    workspace_manager.append_message(
+        user_id,
+        conversation_id,
+        "assistant",
+        assistant_reply,
+        metadata={"task_id": task_id, "source": response_payload.get("source")},
+    )
+    _update_workspace_summary(user_id, conversation_id, user_message, assistant_reply)
+    response_payload.setdefault("workspace", {})
+    response_payload["workspace"].update(
+        {
+            "user_id": user_id,
+            "conversation_id": conversation_id,
+            "session_id": conversation_id,
+            "task_id": task_id,
+        }
+    )
+    return response_payload
 
 
 def _normalize_prediction_result_for_chat(raw_result: dict) -> dict:
@@ -511,27 +727,79 @@ def _match_builtin_skill(message: str, has_file: bool = False, file_suffix: str 
 
     if any(keyword in raw_text for keyword in ("有哪些技能", "技能列表", "当前技能", "当前能力", "已安装技能")) or "list skills" in text:
         return "agent_system_skill", "list_skills", {"route": "builtin_skill_rule", "reason": "explicit_skill_inventory"}
-    if "当前模型" in raw_text:
-        return "agent_system_skill", "current_model", {"route": "builtin_skill_rule", "reason": "current_model"}
-    if "检查模型" in raw_text or "模型状态" in raw_text:
-        return "agent_system_skill", "model_health_check", {"route": "builtin_skill_rule", "reason": "model_health"}
+    if "当前模型" in raw_text or "检查模型" in raw_text or "模型状态" in raw_text:
+        return None, None, {"route": "service_system_info", "reason": "model_query"}
     if "上传帮助" in raw_text:
         return "agent_system_skill", "upload_help", {"route": "builtin_skill_rule", "reason": "upload_help"}
     if "最近实验" in raw_text or "最近记录" in raw_text:
         return "agent_system_skill", "recent_experiments", {"route": "builtin_skill_rule", "reason": "recent_experiments"}
     if "清空会话" in raw_text:
         return "agent_system_skill", "clear_session", {"route": "builtin_skill_rule", "reason": "clear_session"}
-    if any(keyword in raw_text for keyword in ("预处理", "平滑", "去噪", "基线", "归一化")):
+
+    if _looks_like_knowledge_question(raw_text) and not _has_explicit_execution_intent(raw_text):
+        return None, None, {"route": "builtin_skill_rule", "reason": "knowledge_question_skip_skill"}
+
+    if any(keyword in raw_text for keyword in ("预处理", "平滑", "去噪", "基线", "归一化")) and (has_file or _has_explicit_execution_intent(raw_text)):
         return "raman_spectroscopy_skill", "full_preprocess_pipeline", {"route": "builtin_skill_rule", "reason": "preprocess"}
-    if any(keyword in raw_text for keyword in ("画图", "可视化", "光谱图")):
+    if any(keyword in raw_text for keyword in ("画图", "可视化", "光谱图")) and (has_file or _has_explicit_execution_intent(raw_text)):
         return "raman_spectroscopy_skill", "plot_prediction_result", {"route": "builtin_skill_rule", "reason": "visualization"}
-    if any(keyword in raw_text for keyword in ("报告", "生成报告", "实验记录")):
+    if any(keyword in raw_text for keyword in ("报告", "生成报告", "实验记录")) and (has_file or _has_explicit_execution_intent(raw_text)):
         return "raman_spectroscopy_skill", "generate_markdown_report", {"route": "builtin_skill_rule", "reason": "report"}
     if has_file and str(file_suffix or "").lower() == ".csv":
         return "raman_spectroscopy_skill", "predict_methanol_concentration", {"route": "builtin_skill_rule", "reason": "file_prediction_default"}
-    if any(keyword in raw_text for keyword in ("甲醇", "分析这个光谱", "分析这个拉曼", "预测")):
+    if any(keyword in raw_text for keyword in ("甲醇", "分析这个光谱", "分析这个拉曼", "预测")) and (has_file or _has_explicit_execution_intent(raw_text)):
         return "raman_spectroscopy_skill", "predict_methanol_concentration", {"route": "builtin_skill_rule", "reason": "prediction"}
     return None, None, None
+
+
+def _looks_like_knowledge_question(message: str) -> bool:
+    """仅询问概念/方法时不要触发 Skill 执行。"""
+    raw_text = str(message or "").strip()
+    lowered = raw_text.lower()
+    knowledge_markers = (
+        "有哪些",
+        "是什么",
+        "什么是",
+        "区别",
+        "原理",
+        "为什么",
+        "怎么理解",
+        "如何理解",
+        "介绍",
+        "解释一下",
+        "报告怎么写",
+        "一般用什么",
+        "适合什么",
+        "方法",
+    )
+    return any(marker in raw_text for marker in knowledge_markers) or any(
+        marker in lowered for marker in ("what is", "how to", "why", "difference")
+    )
+
+
+def _has_explicit_execution_intent(message: str) -> bool:
+    """判断是否明确指向文件、刚才结果或实际执行动作。"""
+    raw_text = str(message or "").strip()
+    lowered = raw_text.lower()
+    execution_markers = (
+        "这个文件",
+        "刚才",
+        "上传",
+        "csv",
+        "样品",
+        "帮我",
+        "对这个",
+        "把这个",
+        "执行",
+        "进行",
+        "处理",
+        "生成刚才",
+        "分析这个",
+        "继续",
+    )
+    return any(marker in raw_text for marker in execution_markers) or any(
+        marker in lowered for marker in ("this file", "uploaded", "csv", "run", "execute")
+    )
 
 
 def _infer_document_task_type(message: str, file_suffix: str | None = None) -> str:
@@ -617,6 +885,8 @@ def _looks_like_raman_file_task(message: str) -> bool:
 
 def _select_skill_route(message: str, has_file: bool = False, file_suffix: str | None = None) -> tuple[str | None, str | None, dict | None]:
     file_suffix = str(file_suffix or "").lower()
+    if not has_file and _looks_like_knowledge_question(message) and not _has_explicit_execution_intent(message):
+        return None, None, {"route": "knowledge_question_skip_skill", "reason": "no_file_no_execution_intent"}
     if has_file and file_suffix == ".csv":
         if _looks_like_raman_file_task(message):
             return _match_builtin_skill(message, has_file=has_file, file_suffix=file_suffix)
@@ -656,6 +926,141 @@ def _build_no_matching_file_skill_response(
         ),
     }, "fallback", route_info=route_info, debug=debug)
     return response
+
+
+def _is_service_run_tool_overridden() -> bool:
+    """兼容旧测试/旧插件：只有 run_tool 被实例级替换时才走旧工具链。"""
+    return getattr(service.run_tool, "__self__", None) is not service
+
+
+def _analyze_csv_with_service_tools(
+    *,
+    save_path: Path,
+    message: str,
+    session_id: str,
+    metadata: dict | None = None,
+) -> dict:
+    """兼容旧版 analyze-file 测试替身的 service 工具链。"""
+    metadata = dict(metadata or {})
+    saved_file = str(save_path.relative_to(PROJECT_ROOT))
+    prediction_output = service.run_tool("predict_methanol", {"file_path": str(save_path), "debug": False})
+    result = _normalize_prediction_result_for_chat(prediction_output.get("result", {}) or {})
+    if not prediction_output.get("success") or not result:
+        content = "预测结果无效，暂不生成大模型解释。"
+        return _attach_source({
+            "success": False,
+            "session_id": session_id,
+            "message": message,
+            "saved_file": saved_file,
+            "result": None,
+            "professional_analysis": {},
+            "model_info": {},
+            "llm_model_info": _llm_model_info(conversation_id=session_id),
+            "experiment_metadata": metadata,
+            "llm_explanation": content,
+            "llm_error": prediction_output.get("error_message"),
+            "report": None,
+            "web_urls": {"figures": {}, "report_view": "", "report_download": ""},
+            "warnings": list(prediction_output.get("warnings") or []),
+            "error_message": prediction_output.get("error_message") or content,
+            **_build_chat_messages_payload(
+                session_id=session_id,
+                role_type="error",
+                content=content,
+                analysis=None,
+                skill_name="raman_spectroscopy_skill",
+                action_name="predict_methanol_concentration",
+                result_kind="prediction",
+            ),
+        }, "legacy_service_tool")
+
+    raw_result = prediction_output.get("raw_result")
+    if isinstance(raw_result, dict) and raw_result:
+        result["raw_result"] = raw_result
+    professional = service.run_tool(
+        "professional_spectral_analysis",
+        {"csv_path": str(save_path), "prediction_result": result},
+    )
+    if not professional.get("success"):
+        professional = {}
+    model_response = model_registry_service.get_current_model()
+    model_info = model_response.get("data", {}) if model_response.get("success") else {}
+    explain_result = service.run_tool(
+        "explain_result",
+        {
+            "result": result,
+            "professional_analysis": professional,
+            "model_info": model_info,
+            "experiment_metadata": metadata,
+        },
+    )
+    llm_explanation = explain_result.get("explanation") or "分析完成。"
+    report_response = service.run_tool(
+        "generate_report",
+        {
+            "result": result,
+            "llm_explanation": llm_explanation,
+            "professional_analysis": professional,
+            "model_info": model_info,
+            "experiment_metadata": metadata,
+        },
+    )
+    report = {
+        "report_path": report_response.get("report_path"),
+        "report_file": report_response.get("report_file"),
+    } if report_response.get("success") else None
+    web_urls = {
+        "figures": build_figure_web_urls(result.get("figure_paths", {}) or {}),
+        **build_report_web_urls(report or {}),
+    }
+    response_payload = {
+        "success": True,
+        "session_id": session_id,
+        "message": message,
+        "saved_file": saved_file,
+        "result": result,
+        "professional_analysis": professional,
+        "model_info": model_info,
+        "llm_model_info": _llm_model_info(conversation_id=session_id),
+        "experiment_metadata": metadata,
+        "llm_explanation": llm_explanation,
+        "llm_error": explain_result.get("error_message"),
+        "report": report,
+        "web_urls": web_urls,
+        "warnings": list(prediction_output.get("warnings") or []),
+        "skill_name": "raman_spectroscopy_skill",
+        "action_name": "predict_methanol_concentration",
+        "error_message": None,
+    }
+    try:
+        response_payload["history"] = save_analysis_history(
+            {
+                "saved_file": saved_file,
+                "result": result,
+                "llm_explanation": llm_explanation,
+                "report": report or {},
+                "web_urls": web_urls,
+                "professional_analysis": professional,
+                "model_info": model_info,
+                "experiment_metadata": metadata,
+            }
+        )
+    except Exception as exc:
+        response_payload["history_error"] = str(exc)
+        response_payload["warnings"].append(str(exc))
+    analysis_message = _build_analysis_message(response_payload)
+    response_payload.update(
+        _build_chat_messages_payload(
+            session_id=session_id,
+            role_type="analysis",
+            content=analysis_message["summary"],
+            analysis=analysis_message,
+            skill_name="raman_spectroscopy_skill",
+            action_name="predict_methanol_concentration",
+            result_kind="prediction",
+        )
+    )
+    return _attach_source(response_payload, "legacy_service_tool")
 
 
 def _analyze_uploaded_file_with_skills(
@@ -744,6 +1149,7 @@ def _analyze_uploaded_file_with_skills(
         "message": message or "请分析这个甲醇拉曼光谱",
         "saved_file": str(save_path.relative_to(PROJECT_ROOT)),
         "model_info": model_info,
+        "llm_model_info": _llm_model_info(conversation_id=session_id),
         "experiment_metadata": metadata,
         "warnings": list(dict.fromkeys(warnings)),
         "skill_results": {
@@ -764,6 +1170,7 @@ def _analyze_uploaded_file_with_skills(
                 "message": message,
                 "saved_file": str(save_path.relative_to(PROJECT_ROOT)),
                 "error_message": error_message,
+                "llm_model_info": _llm_model_info(conversation_id=session_id),
                 **_build_chat_messages_payload(
                     session_id=session_id,
                     role_type="error",
@@ -823,14 +1230,15 @@ def _analyze_uploaded_file_with_skills(
             {
                 "result": result,
                 "professional_analysis": professional_analysis,
-            "llm_explanation": llm_explanation,
-            "structured_explanation": structured_explanation,
-            "llm_error": llm_error,
-            "report": report,
-            "web_urls": web_urls,
-            "warnings": list(dict.fromkeys(warnings)),
-            "route_info": route_info,
-        }
+                "llm_explanation": llm_explanation,
+                "structured_explanation": structured_explanation,
+                "llm_error": llm_error,
+                "report": report,
+                "web_urls": web_urls,
+                "warnings": list(dict.fromkeys(warnings)),
+                "route_info": route_info,
+                "llm_model_info": _llm_model_info(conversation_id=session_id),
+            }
         )
         try:
             response_payload["history"] = save_analysis_history(
@@ -1013,6 +1421,7 @@ def switch_agent_model(payload: SwitchModelRequest) -> dict:
     result = model_registry_service.switch_current_model_for_agent(payload.model_name)
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["error_message"])
+    reset_predictor_cache()
     return {
         "success": True,
         "current_model": result["current_model"],
@@ -1060,15 +1469,21 @@ async def chat(request: Request) -> dict:
     """统一聊天入口，支持 JSON 聊天和 FormData 文件分析。"""
     content_type = (request.headers.get("content-type") or "").lower()
     message = ""
-    session_id = None
+    conversation_id = None
+    user_id = DEFAULT_USER_ID
     debug = False
     uploaded_file = None
     metadata: dict[str, str | None] = {}
+    provider_id: str | None = None
+    model_id: str | None = None
 
     if "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
         form = await request.form()
         message = str(form.get("message") or "").strip()
-        session_id = str(form.get("session_id") or "").strip() or None
+        conversation_id = str(form.get("conversation_id") or form.get("session_id") or "").strip() or None
+        user_id = str(form.get("user_id") or DEFAULT_USER_ID).strip() or DEFAULT_USER_ID
+        provider_id = str(form.get("provider_id") or "").strip() or None
+        model_id = str(form.get("model_id") or "").strip() or None
         debug = _as_bool(form.get("debug"))
         uploaded_file = form.get("file")
         metadata = {
@@ -1083,15 +1498,37 @@ async def chat(request: Request) -> dict:
     else:
         payload = await request.json()
         message = str(payload.get("message") or "").strip()
-        session_id = payload.get("session_id")
+        conversation_id = payload.get("conversation_id") or payload.get("session_id")
+        user_id = str(payload.get("user_id") or DEFAULT_USER_ID).strip() or DEFAULT_USER_ID
+        provider_id = str(payload.get("provider_id") or "").strip() or None
+        model_id = str(payload.get("model_id") or "").strip() or None
         debug = bool(payload.get("debug", False))
 
-    resolved_session_id = _ensure_session_id(session_id)
+    resolved_session_id = _ensure_session_id(str(conversation_id).strip() if conversation_id else None)
+    resolved_conversation_id = resolved_session_id
+    workspace = workspace_manager.create_workspace(user_id, resolved_session_id)
+    resolved_user_id = workspace["user_id"]
     effective_message = message or "请分析这个文件"
+    user_memory = user_memory_manager.get_user_memory(resolved_user_id)
+    workspace_manager.update_memory_snapshot(resolved_user_id, resolved_session_id, user_memory)
+    workspace_context = workspace_manager.read_workspace_context(resolved_user_id, resolved_session_id)
+    workspace_manager.append_message(
+        resolved_user_id,
+        resolved_session_id,
+        "user",
+        effective_message,
+        metadata={
+            "debug": debug,
+            "has_file": uploaded_file is not None and bool(getattr(uploaded_file, "filename", "")),
+            "context_summary_chars": len(workspace_context.get("context_summary") or ""),
+            "conversation_id": resolved_conversation_id,
+        },
+    )
     append_message(resolved_session_id, "user", effective_message)
 
     if uploaded_file is not None and getattr(uploaded_file, "filename", ""):
-        save_path = await _save_uploaded_attachment(uploaded_file)
+        save_path = await _save_uploaded_attachment(uploaded_file, user_id=resolved_user_id, conversation_id=resolved_session_id)
+        input_files = _workspace_input_files(resolved_user_id, resolved_session_id, save_path)
         if save_path.suffix.lower() != ".csv":
             matched_skill, matched_action, route_info = _select_skill_route(
                 effective_message,
@@ -1099,6 +1536,13 @@ async def chat(request: Request) -> dict:
                 file_suffix=save_path.suffix.lower(),
             )
             if matched_skill is not None and matched_action is not None:
+                task, _ = _start_task_trace(
+                    user_id=resolved_user_id,
+                    conversation_id=resolved_session_id,
+                    intent=matched_action,
+                    input_message=effective_message,
+                    input_files=input_files,
+                )
                 task_type = _infer_document_task_type(effective_message, file_suffix=save_path.suffix.lower())
                 matched_skill_mode = _resolve_uploaded_skill_mode(matched_skill)
                 runner_name = "using_prompt_only_runner" if matched_skill_mode == "prompt_only" else "using_executable_runner"
@@ -1144,6 +1588,7 @@ async def chat(request: Request) -> dict:
                     "skill_mode": matched_skill_mode,
                     "data": skill_result.data,
                     "errors": skill_result.errors,
+                    "task_id": task["task_id"],
                     **_build_chat_messages_payload(
                         session_id=resolved_session_id,
                         role_type="text" if matched_skill_mode == "prompt_only" else ("analysis" if result_kind == "uploaded_skill" else "text"),
@@ -1155,6 +1600,15 @@ async def chat(request: Request) -> dict:
                         skill_mode=matched_skill_mode,
                     ),
                 }, "skill_execution", route_info=route_info, debug=debug)
+                _record_skill_trace(
+                    task_id=task["task_id"],
+                    skill_name=matched_skill,
+                    ability_name=matched_action,
+                    input_files=input_files,
+                    response_payload=response,
+                    raw_result_summary=reply,
+                )
+                user_memory_manager.add_recent_skill(resolved_user_id, matched_skill)
                 append_message(resolved_session_id, "assistant", reply)
                 session_analysis = _build_session_analysis_payload(response, resolved_session_id)
                 update_session(resolved_session_id, "last_analysis", session_analysis)
@@ -1169,7 +1623,14 @@ async def chat(request: Request) -> dict:
                     (time.perf_counter() - started) * 1000,
                     (skill_result.summary or "")[:160],
                 )
-                return response
+                return _finalize_workspace_response(
+                    response,
+                    user_id=resolved_user_id,
+                    conversation_id=resolved_session_id,
+                    user_message=effective_message,
+                    assistant_reply=reply,
+                    task_id=task["task_id"],
+                )
             response = _build_no_matching_file_skill_response(
                 session_id=resolved_session_id,
                 save_path=save_path,
@@ -1184,8 +1645,22 @@ async def chat(request: Request) -> dict:
             update_session(resolved_session_id, "last_file", response.get("saved_file"))
             update_session(resolved_session_id, "last_report", response.get("report"))
             _apply_task_state_from_response(resolved_session_id, response)
-            return response
+            workspace_manager.append_error(resolved_user_id, resolved_session_id, response.get("error_message") or response.get("reply"))
+            return _finalize_workspace_response(
+                response,
+                user_id=resolved_user_id,
+                conversation_id=resolved_session_id,
+                user_message=effective_message,
+                assistant_reply=response.get("reply", ""),
+            )
         started = time.perf_counter()
+        task, _ = _start_task_trace(
+            user_id=resolved_user_id,
+            conversation_id=resolved_session_id,
+            intent="predict_methanol_concentration",
+            input_message=effective_message,
+            input_files=input_files,
+        )
         response = _analyze_uploaded_file_with_skills(
             save_path=save_path,
             message=effective_message,
@@ -1193,6 +1668,16 @@ async def chat(request: Request) -> dict:
             metadata=metadata,
             debug=debug,
         )
+        response["task_id"] = task["task_id"]
+        _record_skill_trace(
+            task_id=task["task_id"],
+            skill_name=response.get("skill_name") or "raman_spectroscopy_skill",
+            ability_name=response.get("action_name") or "predict_methanol_concentration",
+            input_files=input_files,
+            response_payload=response,
+            raw_result_summary=response.get("llm_explanation") or response.get("reply"),
+        )
+        user_memory_manager.add_recent_skill(resolved_user_id, response.get("skill_name") or "raman_spectroscopy_skill")
         logger.info(
             "File skill route completed: success=%s source=%s elapsed_ms=%.2f route=%s",
             response.get("success"),
@@ -1207,12 +1692,129 @@ async def chat(request: Request) -> dict:
             update_session(resolved_session_id, "last_report", response.get("report"))
             append_message(resolved_session_id, "assistant", response.get("llm_explanation", "分析完成。"))
             _apply_task_state_from_response(resolved_session_id, response)
+            return _finalize_workspace_response(
+                response,
+                user_id=resolved_user_id,
+                conversation_id=resolved_session_id,
+                user_message=effective_message,
+                assistant_reply=response.get("llm_explanation", "分析完成。"),
+                task_id=task["task_id"],
+            )
         else:
             append_message(resolved_session_id, "assistant", response.get("error_message", "分析失败。"))
-        return response
+            workspace_manager.append_error(resolved_user_id, resolved_session_id, response.get("error_message", "分析失败。"))
+        return _finalize_workspace_response(
+            response,
+            user_id=resolved_user_id,
+            conversation_id=resolved_session_id,
+            user_message=effective_message,
+            assistant_reply=response.get("error_message", "分析失败。"),
+            task_id=task["task_id"],
+        )
+
+    referenced_active_file = _resolve_referenced_active_file(resolved_user_id, resolved_session_id, effective_message)
+    if referenced_active_file is not None:
+        save_path, active_file_info = referenced_active_file
+        input_files = [active_file_info]
+        task, _ = _start_task_trace(
+            user_id=resolved_user_id,
+            conversation_id=resolved_session_id,
+            intent="continue_active_file_analysis",
+            input_message=effective_message,
+            input_files=input_files,
+        )
+        if save_path.suffix.lower() == ".csv":
+            response = _analyze_uploaded_file_with_skills(
+                save_path=save_path,
+                message=effective_message,
+                session_id=resolved_session_id,
+                metadata=metadata,
+                debug=debug,
+            )
+        else:
+            matched_skill, matched_action, route_info = _select_skill_route(
+                effective_message,
+                has_file=True,
+                file_suffix=save_path.suffix.lower(),
+            )
+            if matched_skill is None or matched_action is None:
+                response = _build_no_matching_file_skill_response(
+                    session_id=resolved_session_id,
+                    save_path=save_path,
+                    message=effective_message,
+                    file_suffix=save_path.suffix.lower(),
+                    route_info=route_info,
+                    debug=debug,
+                )
+            else:
+                matched_skill_mode = _resolve_uploaded_skill_mode(matched_skill)
+                task_type = _infer_document_task_type(effective_message, file_suffix=save_path.suffix.lower())
+                skill_result = execute_skill(
+                    matched_skill,
+                    action_name=matched_action,
+                    file_path=str(save_path),
+                    task_type=task_type,
+                    session_id=resolved_session_id,
+                    message=effective_message,
+                    original_message=effective_message,
+                )
+                reply = str(skill_result.data.get("reply_text") or skill_result.summary or "文件 Skill 执行完成。")
+                result_kind = "prompt_only_skill" if matched_skill_mode == "prompt_only" else _resolve_result_kind(matched_skill, matched_action)
+                response = _attach_source({
+                    "success": skill_result.success,
+                    "session_id": resolved_session_id,
+                    "reply": reply,
+                    "error_message": None if skill_result.success else "；".join(skill_result.errors) or reply,
+                    "intent": matched_action,
+                    "category": "tool",
+                    "skill_name": matched_skill,
+                    "action_name": matched_action,
+                    "skill_mode": matched_skill_mode,
+                    "data": skill_result.data,
+                    "errors": skill_result.errors,
+                    **_build_chat_messages_payload(
+                        session_id=resolved_session_id,
+                        role_type="text" if matched_skill_mode == "prompt_only" else "analysis",
+                        content=reply,
+                        analysis=_build_skill_analysis_payload(matched_skill, matched_action, skill_result.to_dict(), message=reply, save_path=str(save_path)),
+                        skill_name=matched_skill,
+                        action_name=matched_action,
+                        result_kind=result_kind,
+                        skill_mode=matched_skill_mode,
+                    ),
+                }, "skill_execution", route_info=route_info, debug=debug)
+        response["task_id"] = task["task_id"]
+        _record_skill_trace(
+            task_id=task["task_id"],
+            skill_name=response.get("skill_name") or "raman_spectroscopy_skill",
+            ability_name=response.get("action_name") or response.get("intent"),
+            input_files=input_files,
+            response_payload=response,
+            raw_result_summary=response.get("reply") or response.get("llm_explanation"),
+        )
+        if response.get("skill_name"):
+            user_memory_manager.add_recent_skill(resolved_user_id, response.get("skill_name"))
+        assistant_reply = response.get("reply") or response.get("llm_explanation") or response.get("error_message") or "处理完成。"
+        append_message(resolved_session_id, "assistant", assistant_reply)
+        _apply_task_state_from_response(resolved_session_id, response)
+        return _finalize_workspace_response(
+            response,
+            user_id=resolved_user_id,
+            conversation_id=resolved_session_id,
+            user_message=effective_message,
+            assistant_reply=assistant_reply,
+            task_id=task["task_id"],
+        )
 
     matched_skill, matched_action, route_info = _select_skill_route(effective_message, has_file=False)
     if matched_skill is not None and matched_action is not None:
+        task, _ = _start_task_trace(
+            user_id=resolved_user_id,
+            conversation_id=resolved_session_id,
+            intent=matched_action,
+            input_message=effective_message,
+            input_files=_workspace_input_files(resolved_user_id, resolved_session_id),
+        )
         started = time.perf_counter()
         matched_skill_mode = _resolve_uploaded_skill_mode(matched_skill)
         runner_name = "using_prompt_only_runner" if matched_skill_mode == "prompt_only" else "using_executable_runner"
@@ -1244,9 +1846,25 @@ async def chat(request: Request) -> dict:
                     action_name=matched_action,
                 ),
             }, "fallback", route_info=route_info, debug=debug)
+            response["task_id"] = task["task_id"]
+            _record_skill_trace(
+                task_id=task["task_id"],
+                skill_name=matched_skill,
+                ability_name=matched_action,
+                input_files=_workspace_input_files(resolved_user_id, resolved_session_id),
+                response_payload=response,
+                raw_result_summary=content,
+            )
             append_message(resolved_session_id, "assistant", content)
             _apply_task_state_from_response(resolved_session_id, response)
-            return response
+            return _finalize_workspace_response(
+                response,
+                user_id=resolved_user_id,
+                conversation_id=resolved_session_id,
+                user_message=effective_message,
+                assistant_reply=content,
+                task_id=task["task_id"],
+            )
 
         if matched_skill == "raman_spectroscopy_skill" and matched_action in {
             "generate_summary",
@@ -1273,9 +1891,25 @@ async def chat(request: Request) -> dict:
                     result_kind="report",
                 ),
             }, "fallback", route_info=route_info, debug=debug)
+            response["task_id"] = task["task_id"]
+            _record_skill_trace(
+                task_id=task["task_id"],
+                skill_name=matched_skill,
+                ability_name=matched_action,
+                input_files=_workspace_input_files(resolved_user_id, resolved_session_id),
+                response_payload=response,
+                raw_result_summary=content,
+            )
             append_message(resolved_session_id, "assistant", content)
             _apply_task_state_from_response(resolved_session_id, response)
-            return response
+            return _finalize_workspace_response(
+                response,
+                user_id=resolved_user_id,
+                conversation_id=resolved_session_id,
+                user_message=effective_message,
+                assistant_reply=content,
+                task_id=task["task_id"],
+            )
 
         skill_result = execute_skill(
             matched_skill,
@@ -1305,10 +1939,27 @@ async def chat(request: Request) -> dict:
                     action_name=matched_action,
                 ),
             }, "skill_execution", route_info=route_info, debug=debug)
+            response["task_id"] = task["task_id"]
+            _record_skill_trace(
+                task_id=task["task_id"],
+                skill_name=matched_skill,
+                ability_name=matched_action,
+                input_files=_workspace_input_files(resolved_user_id, resolved_session_id),
+                response_payload=response,
+                raw_result_summary=skill_summary,
+            )
+            user_memory_manager.add_recent_skill(resolved_user_id, matched_skill)
             append_message(resolved_session_id, "assistant", skill_summary)
             _apply_task_state_from_response(resolved_session_id, response)
             logger.info("Skill executed: skill=%s action=%s success=%s elapsed_ms=%.2f", matched_skill, matched_action, skill_result.success, (time.perf_counter() - started) * 1000)
-            return response
+            return _finalize_workspace_response(
+                response,
+                user_id=resolved_user_id,
+                conversation_id=resolved_session_id,
+                user_message=effective_message,
+                assistant_reply=skill_summary,
+                task_id=task["task_id"],
+            )
 
         if skill_result.success:
             reply = str(skill_result.data.get("reply_text") or skill_result.summary)
@@ -1333,6 +1984,7 @@ async def chat(request: Request) -> dict:
             "skill_mode": matched_skill_mode,
             "data": skill_result.data,
             "errors": skill_result.errors,
+            "task_id": task["task_id"],
             **_build_chat_messages_payload(
                 session_id=resolved_session_id,
                 role_type="text" if matched_skill_mode == "prompt_only" else ("analysis" if result_kind in {"preprocessing", "prediction", "model_status", "report", "generic", "uploaded_skill"} else "text"),
@@ -1344,6 +1996,15 @@ async def chat(request: Request) -> dict:
                 skill_mode=matched_skill_mode,
             ),
         }, "skill_execution", route_info=route_info, debug=debug)
+        _record_skill_trace(
+            task_id=task["task_id"],
+            skill_name=matched_skill,
+            ability_name=matched_action,
+            input_files=_workspace_input_files(resolved_user_id, resolved_session_id),
+            response_payload=response,
+            raw_result_summary=reply,
+        )
+        user_memory_manager.add_recent_skill(resolved_user_id, matched_skill)
         logger.info(
             "Skill executed: skill=%s action=%s success=%s elapsed_ms=%.2f summary=%s",
             matched_skill,
@@ -1354,10 +2015,92 @@ async def chat(request: Request) -> dict:
         )
         append_message(resolved_session_id, "assistant", reply)
         _apply_task_state_from_response(resolved_session_id, response)
-        return response
+        return _finalize_workspace_response(
+            response,
+            user_id=resolved_user_id,
+            conversation_id=resolved_session_id,
+            user_message=effective_message,
+            assistant_reply=reply,
+            task_id=task["task_id"],
+        )
 
-    structured_response = service.chat(effective_message, debug=debug, session_id=resolved_session_id)
+    structured_response = service.chat(
+        effective_message,
+        extra_params={
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "user_id": resolved_user_id,
+            "conversation_id": resolved_session_id,
+        },
+        debug=debug,
+        session_id=resolved_session_id,
+    )
+    if structured_response.get("intent") == "web_search" or structured_response.get("skill_name") == "web-search":
+        web_search_data = dict(structured_response.get("data") or {})
+        search_task = task_trace_manager.create_task(
+            user_id=resolved_user_id,
+            conversation_id=resolved_session_id,
+            intent="web_search",
+            input_message=effective_message,
+            input_files=[],
+        )
+        identify_step = task_trace_manager.add_step(
+            search_task["task_id"],
+            "识别为联网搜索任务",
+            detail={"query": effective_message},
+        )
+        task_trace_manager.finish_step(
+            identify_step["step_id"],
+            detail={"query": effective_message, "used_provider": web_search_data.get("used_provider")},
+        )
+        select_step = task_trace_manager.add_step(
+            search_task["task_id"],
+            "选择 Skill",
+            detail={"skill_name": "web-search", "ability_name": "search"},
+        )
+        task_trace_manager.finish_step(
+            select_step["step_id"],
+            detail={"skill_name": "web-search", "ability_name": "search"},
+        )
+        execute_step = task_trace_manager.add_step(
+            search_task["task_id"],
+            "执行 Skill",
+            detail={"skill_name": "web-search", "ability_name": "search", "used_provider": web_search_data.get("used_provider")},
+        )
+        task_trace_manager.finish_step(
+            execute_step["step_id"],
+            status="success" if structured_response.get("success") else "failed",
+            detail={
+                "skill_name": "web-search",
+                "ability_name": "search",
+                "used_provider": web_search_data.get("used_provider"),
+                "result_count": len(web_search_data.get("items") or []),
+            },
+            error_message=structured_response.get("error_message"),
+        )
+        task_trace_manager.record_skill_run(
+            task_id=search_task["task_id"],
+            skill_name="web-search",
+            ability_name="search",
+            input_files=[],
+            output_files=[],
+            status="success" if structured_response.get("success") else "failed",
+            error_message=structured_response.get("error_message"),
+            raw_result_summary=str(structured_response.get("reply") or "")[:1000],
+        )
+        structured_response["task_id"] = search_task["task_id"]
     structured_response["session_id"] = resolved_session_id
+    structured_response.setdefault(
+        "llm_model_info",
+        _llm_model_info(
+            user_id=resolved_user_id,
+            conversation_id=resolved_session_id,
+            provider_id=provider_id,
+            model_id=model_id,
+        ),
+    )
+    if structured_response.get("intent") == "system_info_query" and structured_response.get("tool_used") == "get_current_model":
+        structured_response["intent"] = "get_current_model"
     structured_response.update(
         _build_chat_messages_payload(
             session_id=resolved_session_id,
@@ -1366,7 +2109,12 @@ async def chat(request: Request) -> dict:
             analysis=None,
         )
     )
-    _attach_source(structured_response, "llm_response" if structured_response.get("category") == "general_chat" else "fallback", debug=debug)
+    response_source = (
+        "skill_execution"
+        if structured_response.get("skill_name") == "web-search"
+        else ("llm_response" if structured_response.get("category") == "general_chat" else ("tool_execution" if structured_response.get("tool_used") else "fallback"))
+    )
+    _attach_source(structured_response, response_source, debug=debug)
     logger.info(
         "Fallback route completed: source=%s intent=%s category=%s",
         structured_response.get("source"),
@@ -1375,13 +2123,20 @@ async def chat(request: Request) -> dict:
     )
     append_message(resolved_session_id, "assistant", structured_response.get("reply", ""))
     _apply_task_state_from_response(resolved_session_id, structured_response)
-    return structured_response
+    return _finalize_workspace_response(
+        structured_response,
+        user_id=resolved_user_id,
+        conversation_id=resolved_session_id,
+        user_message=effective_message,
+        assistant_reply=structured_response.get("reply", ""),
+    )
 
 
 @router.post("/analyze-file")
 async def analyze_file(
     file: UploadFile = File(...),
     message: str = Form(default="请分析这个文件"),
+    conversation_id: str | None = Form(default=None),
     session_id: str | None = Form(default=None),
     sample_name: str | None = Form(default=None),
     sample_type: str | None = Form(default=None),
@@ -1392,7 +2147,7 @@ async def analyze_file(
     remarks: str | None = Form(default=None),
 ) -> dict:
     """上传文件后，通过 Agent 工具链完成分析。CSV 走光谱分析，其它文件走通用文本分析。"""
-    resolved_session_id = _ensure_session_id(session_id)
+    resolved_session_id = _ensure_session_id(conversation_id or session_id)
     save_path = await _save_uploaded_attachment(file)
     experiment_metadata = {
         "sample_name": sample_name,
@@ -1451,6 +2206,7 @@ async def analyze_file(
                 "result": None,
                 "professional_analysis": {},
                 "model_info": {},
+                "llm_model_info": _llm_model_info(conversation_id=resolved_session_id),
                 "experiment_metadata": experiment_metadata,
                 "llm_explanation": reply,
                 "llm_error": None,
@@ -1508,6 +2264,20 @@ async def analyze_file(
         update_session(resolved_session_id, "last_report", response_payload.get("report"))
         _apply_task_state_from_response(resolved_session_id, response_payload)
         return response_payload
+    if _is_service_run_tool_overridden():
+        response_payload = _analyze_csv_with_service_tools(
+            save_path=save_path,
+            message=message,
+            session_id=resolved_session_id,
+            metadata=experiment_metadata,
+        )
+        append_message(resolved_session_id, "assistant", response_payload.get("reply") or response_payload.get("llm_explanation") or "")
+        session_analysis = _build_session_analysis_payload(response_payload, resolved_session_id)
+        update_session(resolved_session_id, "last_analysis", session_analysis)
+        update_session(resolved_session_id, "last_file", response_payload.get("saved_file"))
+        update_session(resolved_session_id, "last_report", response_payload.get("report"))
+        _apply_task_state_from_response(resolved_session_id, response_payload)
+        return response_payload
     started = time.perf_counter()
     skill_result = execute_skill(
         "raman_spectroscopy_skill",
@@ -1535,12 +2305,13 @@ async def analyze_file(
         "result": skill_result.data.get("result"),
         "professional_analysis": skill_result.data.get("professional_analysis") or {},
         "model_info": skill_result.data.get("model_info") or {},
+        "llm_model_info": _llm_model_info(conversation_id=resolved_session_id),
         "experiment_metadata": experiment_metadata,
         "llm_explanation": reply,
         "llm_error": None if skill_result.success else reply,
         "report": skill_result.data.get("report"),
         "web_urls": skill_result.data.get("web_urls") or {"figures": {}, "report_view": "", "report_download": ""},
-        "warnings": list(skill_result.data.get("warnings") or skill_result.warnings or []),
+        "warnings": list(skill_result.data.get("warnings") or getattr(skill_result, "warnings", []) or []),
         "skill_name": "raman_spectroscopy_skill",
         "action_name": "predict_methanol_concentration",
         "error_message": None if skill_result.success else reply,

@@ -691,7 +691,7 @@ class UploadedPackageSkill(BaseSkill):
         skill_context = self._build_prompt_only_skill_context()
         built_context = dict(conversation_context or self._build_conversation_context(session_id, user_message, file_path=file_path))
 
-        llm_service = LLMService()
+        llm_service = LLMService(conversation_id=session_id)
         llm_result = llm_service.generate_skill_augmented_reply(
             skill_context=skill_context,
             user_message=user_message,

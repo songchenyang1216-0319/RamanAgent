@@ -32,6 +32,17 @@ def _safe_json_dumps(value: Any) -> str | None:
         return None
 
 
+def _string_or_json_or_none(value: Any) -> str | None:
+    """Normalize legacy text columns while tolerating structured values."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, (dict, list)):
+        return _safe_json_dumps(value)
+    return str(value)
+
+
 def _safe_json_loads(value: Any) -> Any:
     if not value:
         return None
@@ -317,17 +328,19 @@ def update_session(session_id: str, key: str, value) -> dict:
                 )
                 session["last_analysis"] = deepcopy(value)
             elif key == "last_file":
+                normalized_value = _string_or_json_or_none(value)
                 connection.execute(
                     "UPDATE agent_sessions SET last_file = ?, updated_at = ?, is_deleted = 0 WHERE session_id = ?",
-                    (None if value in {None, ""} else str(value), now, resolved_session_id),
+                    (normalized_value, now, resolved_session_id),
                 )
-                session["last_file"] = None if value in {None, ""} else str(value)
+                session["last_file"] = normalized_value
             elif key == "last_report":
+                normalized_value = _string_or_json_or_none(value)
                 connection.execute(
                     "UPDATE agent_sessions SET last_report = ?, updated_at = ?, is_deleted = 0 WHERE session_id = ?",
-                    (None if value in {None, ""} else str(value), now, resolved_session_id),
+                    (normalized_value, now, resolved_session_id),
                 )
-                session["last_report"] = None if value in {None, ""} else str(value)
+                session["last_report"] = normalized_value
             elif key == "task_state":
                 task_state = _normalize_task_state(value)
                 connection.execute(
@@ -369,6 +382,11 @@ def get_last_analysis(session_id: str) -> dict | None:
     if session is None:
         return None
     return deepcopy(session.get("last_analysis"))
+
+
+def set_last_analysis(session_id: str, value: dict | list | None) -> dict:
+    """兼容旧调用：持久化最近一次分析结果。"""
+    return update_session(session_id, "last_analysis", value)
 
 
 def get_task_state(session_id: str) -> dict | None:

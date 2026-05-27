@@ -31,8 +31,11 @@ def _load_training_range() -> tuple[float | None, float | None]:
     registry_path = _project_root() / "artifacts" / "model_registry.json"
     try:
         registry = json.loads(registry_path.read_text(encoding="utf-8"))
-        current = registry.get("current_model_version")
-        for model in registry.get("models", []):
+        current = registry.get("current_model_version") or registry.get("default_model")
+        models = registry.get("models", [])
+        if isinstance(models, dict):
+            models = list(models.values())
+        for model in models:
             if not current or model.get("model_version") == current:
                 value = ((model.get("training_data") or {}).get("concentration_range") or [])[:2]
                 if len(value) == 2:

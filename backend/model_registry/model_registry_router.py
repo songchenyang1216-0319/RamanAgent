@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from backend.services.model_registry_service import ModelRegistryService
 
 
-router = APIRouter(prefix="/api/models", tags=["models"])
+router = APIRouter(prefix="/api/raman-models", tags=["raman-models"])
 service = ModelRegistryService()
 
 

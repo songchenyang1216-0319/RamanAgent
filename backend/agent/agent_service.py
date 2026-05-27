@@ -47,6 +47,18 @@ class MultiSkillAgentService:
         """检查文本是否命中任意关键词。"""
         return any(keyword in text for keyword in keywords)
 
+    def _split_request_params(self, params: dict | None = None) -> tuple[dict, dict]:
+        """把路由上下文参数和工具参数分开，避免污染老工具入参。"""
+        raw = dict(params or {})
+        control_keys = {"provider_id", "model_id", "user_id", "conversation_id", "session_id", "debug", "timeout_ms"}
+        request_context = {
+            key: raw.get(key)
+            for key in ("provider_id", "model_id", "user_id", "conversation_id", "session_id")
+            if raw.get(key) is not None
+        }
+        tool_params = {key: value for key, value in raw.items() if key not in control_keys}
+        return request_context, tool_params
+
     def _get_llm_intent_classifier(self) -> LLMIntentClassifier:
         """延迟初始化 LLM 意图分类器。"""
         if self._llm_intent_classifier is None:
@@ -61,9 +73,63 @@ class MultiSkillAgentService:
         data = response.get("data", {}) or {}
         return data.get("model_version")
 
-    def _llm_provider_info(self) -> dict:
+    def _llm_provider_info(self, user_id: str | None = None, conversation_id: str | None = None) -> dict:
         """返回当前通用大模型平台信息。"""
-        return LLMService().get_provider_info()
+        return LLMService(user_id=user_id, conversation_id=conversation_id).get_provider_info()
+
+    def _build_web_search_context(
+        self,
+        query: str,
+        items: list[dict] | None = None,
+        provider_name: str | None = None,
+        answer_hint: str | None = None,
+    ) -> str:
+        """把联网搜索结果整理为可供大模型总结的上下文。"""
+        normalized_items = list(items or [])
+        lines = [
+            "你正在基于联网搜索结果回答用户问题。",
+            f"搜索提供商：{provider_name or 'unknown'}",
+            f"搜索关键词：{query}",
+            "",
+            "来源列表：",
+        ]
+        for index, item in enumerate(normalized_items[:5], start=1):
+            title = str(item.get("title") or "未命名结果").strip()
+            url = str(item.get("url") or "").strip()
+            snippet = str(item.get("snippet") or "").strip()
+            lines.append(f"{index}. {title}")
+            if url:
+                lines.append(f"   URL: {url}")
+            if snippet:
+                lines.append(f"   摘要: {snippet}")
+        if answer_hint:
+            lines.extend(["", f"搜索引擎参考答案：{answer_hint}"])
+        lines.extend(
+            [
+                "",
+                "要求：",
+                "1. 用中文给出自然、简明、可读的最终回答。",
+                "2. 优先依据来源内容，不要编造。",
+                "3. 如果信息不充分，请明确说明不确定。",
+                "4. 可以在末尾简要提到参考了哪些来源。",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _summarize_web_search_results(self, items: list[dict], provider_name: str | None = None) -> str:
+        """当大模型不可用时，对搜索结果做一个本地降级总结。"""
+        normalized_items = list(items or [])
+        lines = [f"我帮你联网搜索到 {len(normalized_items)} 条相关结果，搜索提供商是 {provider_name or 'unknown'}。"]
+        for item in normalized_items[:3]:
+            title = str(item.get("title") or "未命名结果").strip()
+            snippet = str(item.get("snippet") or "").strip()
+            if title:
+                lines.append(f"- {title}")
+            if snippet:
+                lines.append(f"  {snippet}")
+        if not normalized_items:
+            lines.append("但当前没有拿到可引用的来源。")
+        return "\n".join(lines)
 
     def _build_session_memory_context(self, message: str, session_id: str | None = None) -> dict:
         """把持久化会话记忆压缩成普通聊天和 Skill 可复用的上下文。"""
@@ -219,7 +285,7 @@ class MultiSkillAgentService:
     ) -> dict:
         """统一回答平台、模型、文件、Skills、会话等系统信息问题。"""
         query_type = self._infer_system_info_target(message, params=params)
-        provider_info = self._llm_provider_info()
+        provider_info = self._llm_provider_info(conversation_id=session_id)
         model_result = self.run_tool("get_current_model", {})
         model_data = model_result.get("data", {}) if model_result.get("success") else {}
         artifact_result = self.run_tool("check_current_model", {})
@@ -374,7 +440,7 @@ class MultiSkillAgentService:
         return self._build_response(
             intent="context_missing_analysis",
             category="general_chat",
-            reply="我这轮还没有记到可继续引用的分析结果，你可以先上传一个文件或先完成一次分析。",
+            reply="我还没有看到你本轮会话中的分析结果，也还没有记到可继续引用的结果；你可以先上传一个文件或先完成一次分析。",
             next_action="分析完成后，你可以直接继续说“确认”“继续”“展开讲讲”“给我总结一下”，我会接着刚才那次结果往下走。",
             tool_used=None,
             tool_result=None,
@@ -798,6 +864,15 @@ class MultiSkillAgentService:
                 context["history"] = output
             return output
 
+        if tool == "web_search":
+            query = str(params.get("query") or "").strip()
+            if not query:
+                return {"success": False, "error_message": "需要提供搜索关键词。"}
+            output = self.run_tool("web_search", {"query": query, "limit": int(params.get("limit", 5) or 5)})
+            if output.get("success"):
+                context["web_search"] = output
+            return output
+
         if tool == "predict_methanol":
             file_path = params.get("file_path")
             if not file_path:
@@ -926,7 +1001,8 @@ class MultiSkillAgentService:
     ) -> dict:
         """按顺序执行 AgentPlan，并返回瘦身后的结果。"""
         context = {"last_analysis": get_last_analysis(session_id) if session_id else None}
-        params = params or {}
+        params = dict(params or {})
+        params.setdefault("query", message)
         step_status = []
 
         for step in plan.steps:
@@ -1000,6 +1076,26 @@ class MultiSkillAgentService:
             return {
                 "total": tool_result.get("total", len(items)),
                 "items": [self._simplify_history_item(item) for item in items[:5]],
+            }
+
+        if intent == "web_search":
+            items = tool_result.get("items", []) or []
+            def _short_text(value: object, limit: int = 220) -> str:
+                text = str(value or "").strip()
+                return text if len(text) <= limit else text[: max(0, limit - 16)] + "……[已截断]"
+
+            return {
+                "query": tool_result.get("query"),
+                "source": tool_result.get("source"),
+                "total": tool_result.get("total", len(items)),
+                "items": [
+                    {
+                        "title": str(item.get("title") or "").strip(),
+                        "url": str(item.get("url") or "").strip(),
+                        "snippet": _short_text(item.get("snippet") or "", 220),
+                    }
+                    for item in items[:5]
+                ],
             }
 
         if intent in {"get_history_detail", "get_experiment_detail"}:
@@ -1123,7 +1219,9 @@ class MultiSkillAgentService:
             logger.exception("Agent 工具执行失败: %s", tool_name)
             return {
                 "success": False,
-                "error_message": f"工具执行失败: {exc}",
+                "error_code": "TOOL_FAILED",
+                "error_message": "工具执行失败，请检查输入参数或后端日志。",
+                "debug_error": str(exc),
             }
 
     def _build_help_response(self, message: str, debug: bool = False) -> dict:
@@ -1148,8 +1246,8 @@ class MultiSkillAgentService:
             return self._build_response(
                 intent=intent,
                 category="builtin",
-                reply="我是 RamanAgent，一个面向拉曼光谱分析和甲醇浓度预测的智能助手。你可以把我当成会聊天、也会调真实工具的实验分析搭子。",
-                next_action="如果你想看真实系统状态，可以直接问我当前模型、模型文件，或者上传 CSV 让我分析。",
+                reply="我是一个多功能 Agent 工作台，可以进行普通对话、文件处理、Skill 调用和 Raman 光谱分析。Raman 只是其中一个专业 Skill。",
+                next_action="如果你想看真实系统状态，可以直接问我当前大模型、Skills 状态，或者上传文件让我处理。",
                 debug=debug,
                 data=None,
             )
@@ -1157,8 +1255,8 @@ class MultiSkillAgentService:
             return self._build_response(
                 intent=intent,
                 category="builtin",
-                reply="我能做三类事：一类是调用真实工具，比如查当前模型、检查模型文件、看历史记录、分析 CSV；一类是解释 Raman 光谱、机器学习和项目开发问题；还有一类是做普通对话和使用引导。",
-                next_action="如果你想马上开始，可以先上传一个 CSV，或者先问我“当前用的是哪个模型？”。",
+                reply="我能做几类事：普通聊天与知识解释、文件上传与文档处理、Skill 调用、联网搜索，以及作为内置专业 Skill 的 Raman 光谱 CSV 分析。",
+                next_action="你可以像使用 GPT 一样直接提问；需要处理文件时，再上传对应文件并说明目标。",
                 debug=debug,
                 data={"tool_names": self._tool_names()},
             )
@@ -1218,6 +1316,14 @@ class MultiSkillAgentService:
                 "params": {"limit": int(slots.get("limit", 10) or 10)},
             }
 
+        if intent == "web_search":
+            return {
+                "intent": "web_search",
+                "category": "tool",
+                "confidence": llm_result.get("confidence", 0.0),
+                "params": {"query": text, "limit": int(slots.get("limit", 5) or 5)},
+            }
+
         if intent == "file_analysis":
             return {"intent": "predict_methanol", "category": "tool", "confidence": llm_result.get("confidence", 0.0), "params": {}}
 
@@ -1264,11 +1370,20 @@ class MultiSkillAgentService:
             degraded["llm_fallback_error"] = str(exc)
             return degraded
 
-    def _build_general_chat_response(self, message: str, intent_info: dict, debug: bool = False, session_id: str | None = None) -> dict:
+    def _build_general_chat_response(
+        self,
+        message: str,
+        intent_info: dict,
+        debug: bool = False,
+        session_id: str | None = None,
+        provider_id: str | None = None,
+        model_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict:
         """处理普通对话、寒暄和轻量问答。"""
         system_context = {
             "current_model_version": self._current_model_version(),
-            "llm_provider_info": self._llm_provider_info(),
+            "llm_provider_info": self._llm_provider_info(conversation_id=session_id),
         }
         system_context.update(self._build_session_memory_context(message, session_id=session_id))
         intent = intent_info.get("intent", "general_chat")
@@ -1277,14 +1392,21 @@ class MultiSkillAgentService:
 
         llm_response = None
         llm_reply = ""
-        if intent == "general_chat":
-            llm_response = self.general_chat(message, context=system_context)
+        if category == "general_chat":
+            llm_response = self.general_chat(
+                message,
+                context=system_context,
+                provider_id=provider_id,
+                model_id=model_id,
+                user_id=user_id,
+                conversation_id=session_id,
+            )
             llm_reply = (llm_response or {}).get("reply", "") or ""
 
         reply = llm_reply or local_reply
-        next_action = "如果你想继续聊基础问题，也可以直接问我；如果要做 Raman 分析，我也能继续帮你。"
-        if intent in {"capability_intro", "smalltalk", "gratitude", "weather", "joke"}:
-            next_action = "如果你想继续聊 Raman、光谱、模型或 CSV 分析，我也可以接着帮你。"
+        next_action = "你可以继续像普通聊天一样追问；如果需要处理文件或调用 Skill，也可以直接告诉我目标。"
+        if intent in {"capability_intro", "smalltalk", "gratitude", "comfort", "weather", "joke"}:
+            next_action = "你可以继续聊任何主题；涉及实时信息时，说“联网查一下”我会走搜索工具。"
 
         response = self._build_response(
             intent=intent,
@@ -1301,19 +1423,34 @@ class MultiSkillAgentService:
             data=None,
             session_id=session_id,
         )
+        response["model_info"] = (llm_response or {}).get("model_info") or self._llm_provider_info(conversation_id=session_id)
         if llm_response and not llm_response.get("success"):
             response["llm_note"] = llm_response.get("error_message")
         return response
 
-    def general_chat(self, message: str, context: dict | None = None) -> dict:
+    def general_chat(
+        self,
+        message: str,
+        context: dict | None = None,
+        *,
+        provider_id: str | None = None,
+        model_id: str | None = None,
+        user_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> dict:
         """处理普通对话、知识问答和建议类问题。"""
         system_context = {
             "current_model_version": self._current_model_version(),
-            "llm_provider_info": self._llm_provider_info(),
+            "llm_provider_info": self._llm_provider_info(conversation_id=conversation_id),
         }
         if context:
             system_context.update(context)
-        return LLMService().generate_general_reply(message, system_context=system_context)
+        return LLMService(
+            provider_id=provider_id,
+            model_id=model_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        ).generate_general_reply(message, system_context=system_context)
 
     def _resolve_history_identifier(self, params: dict) -> tuple[str | None, str | None]:
         """支持显式 history_id 或“第 N 条记录”两种详情定位方式。"""
@@ -1347,10 +1484,11 @@ class MultiSkillAgentService:
 
             plan = self._planner.plan(message)
             if plan.is_compound:
+                _, plan_params = self._split_request_params(extra_params)
                 return self._execute_agent_plan(
                     plan,
                     message,
-                    params=extra_params or {},
+                    params=plan_params,
                     debug=debug,
                     session_id=session_id,
                 )
@@ -1358,8 +1496,9 @@ class MultiSkillAgentService:
             intent_info = self._resolve_intent_with_fallback(message)
             intent = intent_info["intent"]
             category = intent_info.get("category", "help")
+            request_context, tool_params = self._split_request_params(extra_params)
             params = dict(intent_info.get("params", {}))
-            params.update(extra_params or {})
+            params.update(tool_params)
 
             if category == "help":
                 response = self._build_help_response(message, debug=debug)
@@ -1368,7 +1507,15 @@ class MultiSkillAgentService:
                 return response
 
             if category == "general_chat":
-                return self._build_general_chat_response(message, intent_info, debug=debug, session_id=session_id)
+                return self._build_general_chat_response(
+                    message,
+                    intent_info,
+                    debug=debug,
+                    session_id=session_id,
+                    provider_id=request_context.get("provider_id"),
+                    model_id=request_context.get("model_id"),
+                    user_id=request_context.get("user_id"),
+                )
 
             if category == "builtin":
                 response = self._build_builtin_response(intent, debug=debug)
@@ -1512,6 +1659,111 @@ class MultiSkillAgentService:
                 data = tool_result.get("data", []) or []
                 reply = f"当前已注册 {len(data)} 个模型版本。"
                 next_action = "如果你想看当前实际使用的是哪一个模型，可以继续问我当前模型版本。"
+            elif intent == "web_search":
+                data = dict(tool_result.get("data") or {})
+                items = list(tool_result.get("items") or data.get("items") or [])
+                used_provider = str(
+                    tool_result.get("used_provider")
+                    or data.get("used_provider")
+                    or data.get("provider")
+                    or tool_result.get("source")
+                    or "web_search"
+                ).strip()
+                search_query = str(tool_result.get("query") or data.get("query") or message or "").strip()
+                search_answer = str(tool_result.get("answer") or data.get("answer") or "").strip()
+                conversation_context = {
+                    "current_model_version": self._current_model_version(),
+                    "llm_provider_info": self._llm_provider_info(conversation_id=session_id),
+                }
+                conversation_context.update(self._build_session_memory_context(message, session_id=session_id))
+                if success and items:
+                    llm_response = LLMService(
+                        provider_id=request_context.get("provider_id"),
+                        model_id=request_context.get("model_id"),
+                        user_id=request_context.get("user_id"),
+                        conversation_id=session_id,
+                    ).generate_skill_augmented_reply(
+                        skill_context=self._build_web_search_context(
+                            search_query or message,
+                            items=items,
+                            provider_name=used_provider,
+                            answer_hint=search_answer or None,
+                        ),
+                        user_message=message,
+                        conversation_context=conversation_context,
+                    )
+                    reply = str(llm_response.get("reply") or "").strip() or self._summarize_web_search_results(items, used_provider)
+                    next_action = "如果你愿意，我可以继续根据这些结果帮你整理成更明确的结论。"
+                    response_data = {
+                        "query": search_query or message,
+                        "items": items,
+                        "total": len(items),
+                        "used_provider": used_provider,
+                        "provider": used_provider,
+                        "source": used_provider,
+                        "answer": search_answer or reply,
+                        "search_answer": search_answer,
+                        "request_id": data.get("request_id"),
+                        "response_time": data.get("response_time"),
+                        "search_depth": data.get("search_depth"),
+                        "include_answer": data.get("include_answer"),
+                        "include_raw_content": data.get("include_raw_content"),
+                        "include_images": data.get("include_images"),
+                    }
+                    llm_note = None if llm_response.get("success") else llm_response.get("error_message")
+                    response = self._build_response(
+                        intent=intent,
+                        category="tool",
+                        reply=reply,
+                        next_action=next_action,
+                        tool_used="web_search",
+                        tool_result=tool_result,
+                        raw_intent=intent_info,
+                        llm_raw_response=llm_response.get("raw_response"),
+                        debug=debug,
+                        success=True,
+                        error_message=None,
+                        data=response_data,
+                        session_id=session_id,
+                    )
+                    response["skill_name"] = "web-search"
+                    response["action_name"] = "search"
+                    response["used_skill"] = True
+                    response["model_info"] = llm_response.get("model_info") or self._llm_provider_info(conversation_id=session_id)
+                    if llm_note:
+                        response["llm_note"] = llm_note
+                    return response
+
+                reply = tool_result.get("error_message", "联网搜索失败。")
+                next_action = "你可以换个关键词再试，或者告诉我你想重点查哪一方面。"
+                response = self._build_response(
+                    intent=intent,
+                    category="tool",
+                    reply=reply,
+                    next_action=next_action,
+                    tool_used="web_search",
+                    tool_result=tool_result,
+                    raw_intent=intent_info,
+                    debug=debug,
+                    success=False,
+                    error_message=reply,
+                    data={
+                        "query": search_query or message,
+                        "items": items,
+                        "total": len(items),
+                        "used_provider": used_provider,
+                        "provider": used_provider,
+                        "source": used_provider,
+                        "answer": search_answer or None,
+                        "request_id": data.get("request_id"),
+                        "response_time": data.get("response_time"),
+                    },
+                    session_id=session_id,
+                )
+                response["skill_name"] = "web-search"
+                response["action_name"] = "search"
+                response["used_skill"] = True
+                return response
             elif intent == "predict_methanol":
                 if success:
                     reply = (
@@ -1543,9 +1795,14 @@ class MultiSkillAgentService:
                 compact_data = compact_data or {}
             if intent == "check_current_model":
                 compact_data = compact_data or {}
+            if intent == "get_current_model":
+                compact_data = compact_data or {}
+                compact_data.setdefault("query_type", "current_model")
+                compact_data.setdefault("current_model", dict(compact_data))
 
+            response_intent = "system_info_query" if intent == "get_current_model" else intent
             return self._build_response(
-                intent=intent,
+                intent=response_intent,
                 category="tool",
                 reply=reply,
                 next_action=next_action,
@@ -1560,20 +1817,25 @@ class MultiSkillAgentService:
             )
         except Exception as exc:
             logger.exception("Agent chat 执行失败")
-            return self._build_response(
+            response = self._build_response(
                 intent="unknown",
                 category="help",
-                reply=f"Agent 执行失败：{exc}",
-                next_action="请稍后重试。",
+                reply="这次处理遇到内部错误，我已经保留会话上下文。你可以换个问法重试，或查看后端日志定位原因。",
+                next_action="如果是普通聊天，请直接重试；如果是文件或 Skill 任务，请确认输入文件和 Skill 配置。",
                 tool_used=None,
                 tool_result=None,
                 raw_intent=None,
                 debug=debug,
                 success=False,
-                error_message=str(exc),
+                error_message="Agent 内部处理失败，请查看后端日志。",
                 data=None,
                 session_id=session_id,
             )
+            response["error_code"] = "AGENT_CHAT_FAILED"
+            response["suggestion"] = "请检查当前大模型配置、Skill 状态、输入文件，或查看后端日志。"
+            if debug:
+                response["debug_error"] = str(exc)
+            return response
 
 
 # 兼容旧导入路径，避免一次性改名影响现有模块。

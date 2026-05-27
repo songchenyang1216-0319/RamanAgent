@@ -10,6 +10,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from backend.utils.plot_style import apply_chinese_plot_style
 from .config import FIGURE_DIR, ensure_dirs
 
 
@@ -23,8 +24,7 @@ def _save_single_stage_figure(
     title: str,
     output_path: Path,
 ) -> str:
-    plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "Arial Unicode MS", "DejaVu Sans"]
-    plt.rcParams["axes.unicode_minus"] = False
+    apply_chinese_plot_style()
     fig, ax = plt.subplots(figsize=(8, 3.5))
     ax.plot(axis, values)
     ax.set_title(title)

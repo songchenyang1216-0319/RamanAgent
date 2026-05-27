@@ -69,4 +69,6 @@ class BaseSkill:
 
     def execute(self, action_name: str | None = None, **kwargs: Any) -> SkillResult:
         """执行 Skill 或其默认 action。"""
-        return self.run(action_name=action_name, **kwargs)
+        clean_kwargs = dict(kwargs or {})
+        clean_kwargs.pop("action_name", None)
+        return self.run(action_name=action_name, **clean_kwargs)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -9,16 +10,27 @@ from backend.agent.prompts.general_chat_prompt import (
     build_general_chat_local_reply,
     build_general_chat_system_prompt,
 )
+from backend.core.model_router import ModelRouter
 from dotenv import load_dotenv
+from raman_core.methanol.config import PROJECT_ROOT
 
 
-load_dotenv()
+load_dotenv(PROJECT_ROOT / ".env")
+logger = logging.getLogger(__name__)
+FALLBACK_PREFIX = "当前大模型服务不可用，以下是本地规则生成的简要回答。\n\n"
 
 
 class LLMService:
-    """基于 OpenAI-compatible 接口生成甲醇预测结果解释。"""
+    """基于当前选中的大语言模型生成回答与解释。"""
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        provider_id: str | None = None,
+        model_id: str | None = None,
+        user_id: str | None = None,
+        conversation_id: str | None = None,
+    ):
         def _safe_float(env_name: str, default: float) -> float:
             try:
                 return float(os.getenv(env_name, str(default)))
@@ -31,72 +43,130 @@ class LLMService:
             except (TypeError, ValueError):
                 return default
 
-        self.api_key = os.getenv("SILICONFLOW_API_KEY", "").strip()
-        self.base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1").strip()
-        self.model = os.getenv("SILICONFLOW_MODEL", "Qwen/Qwen2.5-72B-Instruct").strip()
+        self.model_router = ModelRouter()
+        self.selection = self.model_router.get_selected_model(user_id=user_id, conversation_id=conversation_id)
+        if provider_id or model_id:
+            self.selection = self.model_router.resolve_selection(
+                provider_id=provider_id,
+                model_id=model_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
+        self.provider_config = dict(self.selection.get("provider_config") or {})
+        self.provider = str(self.selection.get("provider_id") or "").strip()
+        self.provider_display_name = str(self.selection.get("provider_name") or "").strip()
+        self.model = str(self.selection.get("model_id") or "").strip()
+        self.model_display_name = str(self.selection.get("model_name") or self.model).strip()
+        self.display_name = f"{self.provider_display_name} · {self.model_display_name}".strip(" ·")
+        self.api_key_env = str(self.provider_config.get("api_key_env") or "").strip()
+        self.base_url = str(self.provider_config.get("base_url") or "").strip()
+        self.api_key = str(self.provider_config.get("api_key") or "").strip()
         self.temperature = _safe_float("LLM_TEMPERATURE", 0.6)
-        self.max_tokens = _safe_int("LLM_MAX_TOKENS", 1200)
+        self.max_tokens = _safe_int("LLM_MAX_TOKENS", 4096)
+        self.timeout_seconds = _safe_int("LLM_TIMEOUT_SECONDS", 60)
+        self.default_stream = str(os.getenv("LLM_STREAM", "true")).strip().lower() in {"1", "true", "yes", "on"}
         self.client = None
         self.import_error_message = None
 
-        if self.api_key:
+        if self.base_url and (self.api_key or self.provider == "ollama"):
             try:
-                from openai import OpenAI
-
-                self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+                self.client = self.model_router.create_client(self.provider)
             except ModuleNotFoundError:
                 self.import_error_message = "未安装 openai 依赖，无法生成大模型解释。"
             except Exception as exc:
                 self.import_error_message = f"初始化大模型客户端失败: {exc}"
+        else:
+            self.import_error_message = self.selection.get("reason") or (
+                "当前平台 BASE_URL 未配置，请检查 .env。"
+                if not self.base_url
+                else f"{self.api_key_env or 'API_KEY'} 未配置"
+            )
+
+        logger.info(
+            "LLMService initialized: provider=%s model=%s base_url=%s api_key_present=%s import_ready=%s import_error=%s",
+            self.get_provider_info().get("provider_label"),
+            self.model,
+            self.base_url,
+            bool(self.api_key),
+            self.import_error_message is None,
+            self.import_error_message or "",
+        )
 
     def get_provider_info(self) -> dict[str, Any]:
         """返回当前大模型平台与配置状态，供 Agent 直接回答“用的是哪家平台”。"""
-        normalized_base_url = (self.base_url or "").strip()
-        lowered_base_url = normalized_base_url.lower()
         configured = bool(self.api_key)
-
-        provider_name = "未配置平台大模型"
-        provider_label = "未配置"
-        if configured:
-            if "siliconflow" in lowered_base_url or "siliconflow.cn" in lowered_base_url:
-                provider_name = "硅基流动"
-                provider_label = "siliconflow"
-            elif "openai" in lowered_base_url:
-                provider_name = "OpenAI-compatible 平台"
-                provider_label = "openai-compatible"
-            else:
-                provider_name = "OpenAI-compatible 自定义平台"
-                provider_label = "custom-openai-compatible"
+        provider_name = self.provider_display_name or "未配置平台大模型"
+        provider_label = self.provider or "未配置"
+        available = bool(self.selection.get("configured", configured) or self.provider == "ollama")
+        reason = str(self.selection.get("reason") or self.import_error_message or "").strip()
 
         return {
             "configured": configured,
             "provider_name": provider_name,
+            "provider_display_name": self.provider_display_name,
             "provider_label": provider_label,
-            "base_url": normalized_base_url,
+            "provider": self.provider,
+            "base_url": self.base_url,
             "model": self.model,
+            "model_name": self.model_display_name,
+            "display_name": self.display_name,
             "api_key_configured": configured,
+            "api_key_env": self.api_key_env,
+            "available": available,
+            "reason": reason,
             "import_ready": self.import_error_message is None,
             "import_error_message": self.import_error_message,
-            "fallback_mode": not configured,
+            "fallback_mode": not available,
         }
+
+    def get_current_model_info(self) -> dict[str, Any]:
+        """返回当前 LLM 的精简信息，适合直接放到聊天响应里。"""
+        provider_info = self.get_provider_info()
+        return {
+            "provider": provider_info.get("provider"),
+            "provider_display_name": provider_info.get("provider_display_name"),
+            "model": provider_info.get("model"),
+            "model_display_name": provider_info.get("model_name"),
+            "display_name": provider_info.get("display_name"),
+            "available": provider_info.get("available"),
+            "reason": provider_info.get("reason"),
+            "base_url": provider_info.get("base_url"),
+            "api_key_env": provider_info.get("api_key_env"),
+        }
+
+    def _friendly_model_error(self, exc: Exception | str | None = None) -> str:
+        """把底层模型异常转换成面向用户的稳定提示。"""
+        text = str(exc or self.import_error_message or "").strip()
+        if self.provider == "ollama":
+            return "Ollama 调用失败，请确认 ollama serve 已启动，并且已 pull 对应模型。"
+        if (self.api_key_env and not self.api_key) or "API Key 未配置" in text or "API_KEY" in text:
+            return f"当前平台 API Key 未配置，请检查 .env 中的 {self.api_key_env or '对应 API_KEY'}。"
+        if not self.base_url or "BASE_URL" in text:
+            return "当前平台 BASE_URL 未配置，请检查 .env。"
+        if "未安装 openai" in text:
+            return "未安装 openai 依赖，请执行 pip install -r requirements.txt。"
+        return "模型请求失败，请检查 API Key、Base URL、模型 ID 和网络连接。"
 
     def _chat_complete(self, system_prompt: str, user_prompt: str) -> tuple[str, dict | None]:
         """执行一次通用 OpenAI-compatible 对话请求。"""
-        if not self.api_key:
-            raise RuntimeError("未配置 SILICONFLOW_API_KEY")
+        if self.provider != "ollama" and not self.api_key:
+            raise RuntimeError(self.import_error_message or f"未配置 {self.api_key_env or 'API_KEY'}")
         if self.import_error_message:
             raise RuntimeError(self.import_error_message)
         if self.client is None:
             raise RuntimeError("大模型客户端未成功初始化")
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
+        response, _ = self.model_router.chat(
+            [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            provider_id=self.provider,
+            model_id=self.model,
+            stream=False,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
+            timeout_seconds=self.timeout_seconds,
         )
         content = response.choices[0].message.content if response.choices else ""
         raw = response.model_dump() if hasattr(response, "model_dump") else None
@@ -115,14 +185,36 @@ class LLMService:
             reply, raw = self._chat_complete(system_prompt, user_prompt)
             if not reply:
                 reply = build_general_chat_local_reply(message, system_context=system_context)
-                return {"success": False, "reply": reply, "error_message": "大模型未返回有效内容。", "raw_response": raw}
-            return {"success": True, "reply": reply, "error_message": None, "raw_response": raw}
+                logger.warning(
+                    "LLM general reply returned empty content: provider=%s model=%s base_url=%s",
+                    self.get_provider_info().get("provider_label"),
+                    self.model,
+                    self.base_url,
+                )
+                return {
+                    "success": False,
+                    "reply": FALLBACK_PREFIX + reply,
+                    "error_message": "大模型未返回有效内容。",
+                    "raw_response": raw,
+                    "model_info": self.get_current_model_info(),
+                }
+            return {"success": True, "reply": reply, "error_message": None, "raw_response": raw, "model_info": self.get_current_model_info()}
         except Exception as exc:
+            logger.warning(
+                "LLM general reply failed: provider=%s model=%s base_url=%s api_key_present=%s error_type=%s error=%s",
+                self.get_provider_info().get("provider_label"),
+                self.model,
+                self.base_url,
+                bool(self.api_key),
+                type(exc).__name__,
+                exc,
+            )
             return {
                 "success": False,
-                "reply": build_general_chat_local_reply(message, system_context=system_context),
-                "error_message": f"通用对话服务不可用: {exc}",
+                "reply": FALLBACK_PREFIX + build_general_chat_local_reply(message, system_context=system_context),
+                "error_message": self._friendly_model_error(exc),
                 "raw_response": None,
+                "model_info": self.get_current_model_info(),
             }
 
     def generate_skill_augmented_reply(
@@ -158,21 +250,38 @@ class LLMService:
         try:
             reply, raw = self._chat_complete(system_prompt, user_prompt)
             if not reply:
+                logger.warning(
+                    "LLM prompt-only skill reply returned empty content: provider=%s model=%s base_url=%s",
+                    self.get_provider_info().get("provider_label"),
+                    self.model,
+                    self.base_url,
+                )
                 return {
                     "success": False,
-                    "reply": build_general_chat_local_reply(user_message, system_context=conversation_context),
+                    "reply": FALLBACK_PREFIX + build_general_chat_local_reply(user_message, system_context=conversation_context),
                     "error_message": "大模型未返回有效内容。",
                     "raw_response": raw,
                     "warnings": ["大模型未返回有效内容，已回退本地回复。"],
+                    "model_info": self.get_current_model_info(),
                 }
-            return {"success": True, "reply": reply, "error_message": None, "raw_response": raw, "warnings": []}
+            return {"success": True, "reply": reply, "error_message": None, "raw_response": raw, "warnings": [], "model_info": self.get_current_model_info()}
         except Exception as exc:
+            logger.warning(
+                "LLM prompt-only skill reply failed: provider=%s model=%s base_url=%s api_key_present=%s error_type=%s error=%s",
+                self.get_provider_info().get("provider_label"),
+                self.model,
+                self.base_url,
+                bool(self.api_key),
+                type(exc).__name__,
+                exc,
+            )
             return {
                 "success": False,
-                "reply": build_general_chat_local_reply(user_message, system_context=conversation_context),
-                "error_message": f"提示词型 Skill 大模型调用失败: {exc}",
+                "reply": FALLBACK_PREFIX + build_general_chat_local_reply(user_message, system_context=conversation_context),
+                "error_message": self._friendly_model_error(exc),
                 "raw_response": None,
-                "warnings": [f"提示词型 Skill 大模型调用失败: {exc}"],
+                "warnings": [self._friendly_model_error(exc)],
+                "model_info": self.get_current_model_info(),
             }
 
     def _sanitize_result_for_llm(self, result: dict[str, Any]) -> dict[str, Any]:
@@ -242,4 +351,13 @@ class LLMService:
             content, _ = self._chat_complete(system_prompt, user_prompt)
             return content or "大模型未返回有效解释内容。"
         except Exception as exc:
-            return f"大模型解释生成失败: {exc}"
+            logger.warning(
+                "LLM methanol explanation failed: provider=%s model=%s base_url=%s api_key_present=%s error_type=%s error=%s",
+                self.get_provider_info().get("provider_label"),
+                self.model,
+                self.base_url,
+                bool(self.api_key),
+                type(exc).__name__,
+                exc,
+            )
+            return f"{FALLBACK_PREFIX}大模型解释生成失败: {exc}"

@@ -6,10 +6,14 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.agent.agent_router import router as agent_router
 from backend.api.file_api import router as file_router
+from backend.api.llm_api import router as llm_router
+from backend.api.model_api import router as model_router
+from backend.api.workspace_api import router as workspace_router
 from backend.api.history_api import router as history_router
 from backend.api.methanol_api import router as methanol_router
 from backend.model_registry.model_registry_router import router as model_registry_router
 from backend.services.model_registry_service import ModelRegistryService
+from backend.services.llm_registry_service import LLMRegistryService
 from backend.db.database import init_agent_memory_db
 from backend.services.history_service import init_history_db
 from raman_core.methanol.config import FIGURE_DIR, OUTPUT_DIR, PROJECT_ROOT, REPORT_DIR, ensure_dirs
@@ -18,7 +22,7 @@ from raman_core.methanol.config import FIGURE_DIR, OUTPUT_DIR, PROJECT_ROOT, REP
 ensure_dirs()
 
 
-app = FastAPI(title="Multi-Skill Agent API")
+app = FastAPI(title="RamanAgent API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -34,6 +38,9 @@ app.add_middleware(
 app.include_router(agent_router)
 app.include_router(methanol_router)
 app.include_router(file_router)
+app.include_router(model_router)
+app.include_router(llm_router)
+app.include_router(workspace_router)
 app.include_router(history_router)
 app.include_router(model_registry_router)
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
@@ -48,6 +55,7 @@ def startup() -> None:
     init_history_db()
     init_agent_memory_db()
     ModelRegistryService().load_registry()
+    LLMRegistryService().get_current_model()
 
 
 @app.get("/")

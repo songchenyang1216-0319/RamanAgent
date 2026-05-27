@@ -10,6 +10,13 @@ from .spectral_preprocessing_skill import SpectralPreprocessingSkill
 from .spectral_visualization_skill import SpectralVisualizationSkill
 
 
+def _clean_skill_kwargs(kwargs: dict | None) -> dict:
+    """转发给子 Skill 前移除会造成重复绑定的公共参数。"""
+    clean_kwargs = dict(kwargs or {})
+    clean_kwargs.pop("action_name", None)
+    return clean_kwargs
+
+
 class RamanSpectroscopySkill(BaseSkill):
     """把 Raman 领域能力聚合成一个对外 Skill。"""
 
@@ -122,9 +129,10 @@ class RamanSpectroscopySkill(BaseSkill):
 
     def run(self, **kwargs: Any) -> SkillResult:
         action_name = str(kwargs.get("action_name") or "predict_methanol_concentration")
+        clean_kwargs = _clean_skill_kwargs(kwargs)
 
         if action_name in {"load_csv", "validate_csv", "inspect_spectrum", "extract_metadata"}:
-            result = self._file_skill.run(action_name=action_name, **kwargs)
+            result = self._file_skill.run(action_name=action_name, **clean_kwargs)
             return self._normalize_result(result, action_name)
 
         if action_name in {
@@ -137,7 +145,7 @@ class RamanSpectroscopySkill(BaseSkill):
             "resample_wavenumber_axis",
             "full_preprocess_pipeline",
         }:
-            result = self._preprocess_skill.run(action_name=action_name, **kwargs)
+            result = self._preprocess_skill.run(action_name=action_name, **clean_kwargs)
             return self._normalize_result(result, action_name)
 
         if action_name in {
@@ -146,7 +154,7 @@ class RamanSpectroscopySkill(BaseSkill):
             "plot_baseline_comparison",
             "plot_prediction_result",
         }:
-            result = self._visualization_skill.run(action_name=action_name, **kwargs)
+            result = self._visualization_skill.run(action_name=action_name, **clean_kwargs)
             return self._normalize_result(result, action_name)
 
         if action_name in {
@@ -155,7 +163,7 @@ class RamanSpectroscopySkill(BaseSkill):
             "get_model_info",
             "check_prediction_input",
         }:
-            result = self._analysis_skill.run(action_name=action_name, **kwargs)
+            result = self._analysis_skill.run(action_name=action_name, **clean_kwargs)
             return self._normalize_result(result, action_name)
 
         if action_name in {
@@ -164,7 +172,7 @@ class RamanSpectroscopySkill(BaseSkill):
             "generate_experiment_record",
             "export_report",
         }:
-            result = self._report_skill.run(action_name=action_name, **kwargs)
+            result = self._report_skill.run(action_name=action_name, **clean_kwargs)
             return self._normalize_result(result, action_name)
 
         return SkillResult(

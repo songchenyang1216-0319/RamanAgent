@@ -47,6 +47,7 @@ sympy==1.14.0
 threadpoolctl==3.6.0
 torch==2.12.0
 tqdm==4.67.3
+tavily-python
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 tzdata==2026.2

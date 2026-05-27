@@ -1,0 +1,149 @@
+{
+  "tasks": [
+    {
+      "task_id": "69684a79a4534504948f0c9d07ac082c",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "recent_experiments",
+      "status": "success",
+      "input_message": "最近记录",
+      "input_files": [],
+      "output_files": [],
+      "selected_skill": "agent_system_skill",
+      "selected_ability": "recent_experiments",
+      "created_at": "2026-05-27T11:08:21",
+      "updated_at": "2026-05-27T11:08:21",
+      "error_message": null
+    },
+    {
+      "task_id": "d8acbe7ab7ad40bca43c6353c6524793",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "run_uploaded_skill",
+      "status": "success",
+      "input_message": "分析一下这个是什么",
+      "input_files": [
+        {
+          "file_id": "附件2_3d6ad52b",
+          "filename": "附件2_3d6ad52b.docx",
+          "original_name": "附件2.docx",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\附件2_3d6ad52b.docx",
+          "workspace_relative_path": "uploads\\附件2_3d6ad52b.docx",
+          "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "size": 16178,
+          "kind": "upload",
+          "updated_at": "2026-05-27T13:11:06"
+        }
+      ],
+      "output_files": [],
+      "selected_skill": "text-document-processor",
+      "selected_ability": "run_uploaded_skill",
+      "created_at": "2026-05-27T13:11:06",
+      "updated_at": "2026-05-27T13:11:16",
+      "error_message": null
+    },
+    {
+      "task_id": "56e076969cbe4b4085ba78dee9a4aba2",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "run_uploaded_skill",
+      "status": "success",
+      "input_message": "总结一下这个",
+      "input_files": [
+        {
+          "file_id": "工程伦理课程报告-20251513139-宋晨阳_2fcfb6a7",
+          "filename": "工程伦理课程报告-20251513139-宋晨阳_2fcfb6a7.docx",
+          "original_name": "工程伦理课程报告-20251513139-宋晨阳.docx",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\工程伦理课程报告-20251513139-宋晨阳_2fcfb6a7.docx",
+          "workspace_relative_path": "uploads\\工程伦理课程报告-20251513139-宋晨阳_2fcfb6a7.docx",
+          "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "size": 188901,
+          "kind": "upload",
+          "updated_at": "2026-05-27T13:12:10"
+        }
+      ],
+      "output_files": [],
+      "selected_skill": "text-document-processor",
+      "selected_ability": "run_uploaded_skill",
+      "created_at": "2026-05-27T13:12:10",
+      "updated_at": "2026-05-27T13:12:23",
+      "error_message": null
+    },
+    {
+      "task_id": "e781beb772d346e4a1bcc2b6ed6468b6",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "run_uploaded_skill",
+      "status": "success",
+      "input_message": "总结一下这个",
+      "input_files": [
+        {
+          "file_id": "新建_Microsoft_Word_文档_3_f7a55c0b",
+          "filename": "新建_Microsoft_Word_文档_3_f7a55c0b.docx",
+          "original_name": "新建 Microsoft Word 文档 (3).docx",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\新建_Microsoft_Word_文档_3_f7a55c0b.docx",
+          "workspace_relative_path": "uploads\\新建_Microsoft_Word_文档_3_f7a55c0b.docx",
+          "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "size": 7036473,
+          "kind": "upload",
+          "updated_at": "2026-05-27T13:13:17"
+        }
+      ],
+      "output_files": [],
+      "selected_skill": "text-document-processor",
+      "selected_ability": "run_uploaded_skill",
+      "created_at": "2026-05-27T13:13:17",
+      "updated_at": "2026-05-27T13:13:37",
+      "error_message": null
+    },
+    {
+      "task_id": "5f528cc3decb424b99ae8b73af85f616",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "web_search",
+      "status": "failed",
+      "input_message": "今天是什么节日",
+      "input_files": [],
+      "output_files": [],
+      "selected_skill": "web-search",
+      "selected_ability": "search",
+      "created_at": "2026-05-27T14:36:14",
+      "updated_at": "2026-05-27T14:36:14",
+      "error_message": "联网搜索已启用 Tavily，但 TAVILY_API_KEY 未配置。请在 .env 中填写 TAVILY_API_KEY。"
+    },
+    {
+      "task_id": "dedc45ed933648389541d316c6f1504d",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "web_search",
+      "status": "failed",
+      "input_message": "今天是什么节日",
+      "input_files": [],
+      "output_files": [],
+      "selected_skill": "web-search",
+      "selected_ability": "search",
+      "created_at": "2026-05-27T14:38:22",
+      "updated_at": "2026-05-27T14:38:22",
+      "error_message": "未安装 tavily-python 依赖，请执行 pip install -r requirements.txt。"
+    },
+    {
+      "task_id": "0ca7e53341194f3fa1c483845a8214c1",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "web_search",
+      "status": "success",
+      "input_message": "今天是什么节日",
+      "input_files": [],
+      "output_files": [],
+      "selected_skill": "web-search",
+      "selected_ability": "search",
+      "created_at": "2026-05-27T14:41:55",
+      "updated_at": "2026-05-27T14:41:55",
+      "error_message": null
+    }
+  ],
+  "current_task_id": "0ca7e53341194f3fa1c483845a8214c1",
+  "updated_at": "2026-05-27T14:41:55",
+  "selected_provider": "sensenova",
+  "selected_model": "deepseek-v4-flash"
+}

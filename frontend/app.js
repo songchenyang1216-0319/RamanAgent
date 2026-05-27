@@ -1,15 +1,23 @@
 import {
-  checkCurrentModel,
   clearAgentSession,
-  getAgentModels,
-  getCurrentModel,
+  checkCurrentModel,
+  getCurrentRamanModel,
+  getConversationMessages,
+  getConversationTasks,
+  getCurrentLlmModel,
+  getModelProviders,
+  getProviderModels,
+  getTaskTrace,
   getAgentSession,
+  getWorkspaceContext,
+  getWorkspaceFiles,
   loadSkills as fetchSkills,
   deleteSkill as requestDeleteSkill,
   sendAgentChat,
   setActionEnabled as requestSetActionEnabled,
   setSkillEnabled as requestSetSkillEnabled,
-  switchAgentModel,
+  switchLlmModel,
+  refreshLlmModels,
   toAssetUrl,
   uploadSkillZip as requestUploadSkillZip,
 } from "./js/api.js";
@@ -18,11 +26,18 @@ const STORAGE_KEYS = {
   sessionId: "multiskill-agent.sessionId",
   legacySessionId: "ramanagent.sessionId",
 };
+const RESPONSE_FIELD_KEYS = {
+  professionalAnalysis: "professional_analysis",
+};
+const DEBUG_LOGS = false;
 
 const state = {
   sessionId: loadSessionId(),
   currentModel: null,
-  modelsPayload: { current_model: "", models: [] },
+  llmModelsPayload: { current: null, providers: [], selectedProviderId: "", models: [] },
+  workspacePayload: { files: null, context: null, tasks: null, messages: null },
+  workspaceOpen: false,
+  userId: "default_user",
   selectedFile: null,
   skillsPayload: null,
   expandedSkillNames: new Set(),
@@ -32,9 +47,16 @@ const state = {
   modelListOpen: false,
   refreshingDashboard: false,
   uploadingSkill: false,
+  toastTimer: null,
 };
 
 const $ = (id) => document.getElementById(id);
+
+function debugLog(...args) {
+  if (DEBUG_LOGS) {
+    console.log(...args);
+  }
+}
 
 function loadSessionId() {
   try {
@@ -55,6 +77,245 @@ function escapeHtml(text) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function formatDurationMs(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) {
+    return "";
+  }
+  if (num < 1000) {
+    return `${Math.round(num)} ms`;
+  }
+  return `${(num / 1000).toFixed(num >= 10000 ? 0 : 1)} s`;
+}
+
+function showToast(message, type = "info") {
+  if (!message) {
+    return;
+  }
+  let node = document.getElementById("globalToast");
+  if (!node) {
+    node = document.createElement("div");
+    node.id = "globalToast";
+    node.className = "global-toast";
+    document.body.appendChild(node);
+  }
+  node.className = `global-toast ${type}`.trim();
+  node.textContent = message;
+  node.classList.add("visible");
+  if (state.toastTimer) {
+    window.clearTimeout(state.toastTimer);
+  }
+  state.toastTimer = window.setTimeout(() => {
+    node.classList.remove("visible");
+  }, 2400);
+}
+
+function renderInlineMarkdown(text) {
+  const placeholders = [];
+  let html = escapeHtml(text);
+  html = html.replace(/`([^`]+)`/g, (_, code) => {
+    placeholders.push(code);
+    return `%%CODE_${placeholders.length - 1}%%`;
+  });
+  html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/(^|[\s(])_([^_\n]+)_(?=$|[\s).,;!?])/g, "$1<em>$2</em>");
+  html = html.replace(/%%CODE_(\d+)%%/g, (_, index) => `<code>${placeholders[Number(index)] ?? ""}</code>`);
+  return html;
+}
+
+function isTableDividerLine(line) {
+  const cells = String(line || "")
+    .trim()
+    .split("|")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (!cells.length) {
+    return false;
+  }
+  return cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function renderMarkdownTable(lines, startIndex) {
+  const headerLine = lines[startIndex];
+  const dividerLine = lines[startIndex + 1];
+  if (!headerLine || !dividerLine || !headerLine.includes("|") || !isTableDividerLine(dividerLine)) {
+    return null;
+  }
+  const rows = [];
+  let index = startIndex;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line || !line.includes("|")) {
+      break;
+    }
+    rows.push(line);
+    index += 1;
+  }
+  const splitRow = (line) =>
+    String(line || "")
+      .trim()
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((cell) => cell.trim());
+  const headers = splitRow(rows[0]).map((cell) => renderInlineMarkdown(cell));
+  const bodyRows = rows.slice(2).map((row) => splitRow(row).map((cell) => renderInlineMarkdown(cell)));
+  const bodyHtml = bodyRows
+    .map((cells) => `<tr>${cells.map((cell) => `<td>${cell}</td>`).join("")}</tr>`)
+    .join("");
+  return {
+    html: `
+      <div class="markdown-table-wrap">
+        <table class="markdown-table">
+          <thead><tr>${headers.map((cell) => `<th>${cell}</th>`).join("")}</tr></thead>
+          <tbody>${bodyHtml}</tbody>
+        </table>
+      </div>
+    `,
+    nextIndex: index,
+  };
+}
+
+function renderMarkdown(text) {
+  const source = String(text ?? "").replace(/\r\n/g, "\n");
+  if (!source.trim()) {
+    return "";
+  }
+
+  const lines = source.split("\n");
+  const blocks = [];
+  let index = 0;
+
+  const flushParagraph = (paragraphLines) => {
+    if (!paragraphLines.length) {
+      return;
+    }
+    const content = paragraphLines.join(" ").trim();
+    if (content) {
+      blocks.push(`<p>${renderInlineMarkdown(content)}</p>`);
+    }
+    paragraphLines.length = 0;
+  };
+
+  while (index < lines.length) {
+    const line = lines[index];
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      index += 1;
+      continue;
+    }
+
+    if (/^```/.test(trimmed) || /^~~~/.test(trimmed)) {
+      const fence = trimmed.slice(0, 3);
+      const language = trimmed.slice(3).trim();
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !lines[index].trim().startsWith(fence)) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) {
+        index += 1;
+      }
+      blocks.push(`
+        <pre class="markdown-code-block${language ? ` language-${escapeHtml(language)}` : ""}"><code>${escapeHtml(codeLines.join("\n"))}</code></pre>
+      `);
+      continue;
+    }
+
+    if (/^#{1,6}\s+/.test(trimmed)) {
+      const level = Math.min(6, trimmed.match(/^#{1,6}/)[0].length);
+      const content = trimmed.replace(/^#{1,6}\s+/, "").trim();
+      blocks.push(`<h${level}>${renderInlineMarkdown(content)}</h${level}>`);
+      index += 1;
+      continue;
+    }
+
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
+      blocks.push("<hr />");
+      index += 1;
+      continue;
+    }
+
+    if (/^>\s?/.test(trimmed)) {
+      const quoteLines = [];
+      while (index < lines.length && /^>\s?/.test(lines[index].trim())) {
+        quoteLines.push(lines[index].trim().replace(/^>\s?/, ""));
+        index += 1;
+      }
+      blocks.push(`<blockquote>${renderMarkdown(quoteLines.join("\n"))}</blockquote>`);
+      continue;
+    }
+
+    const table = renderMarkdownTable(lines, index);
+    if (table) {
+      blocks.push(table.html);
+      index = table.nextIndex;
+      continue;
+    }
+
+    if (/^(\d+\.\s+|[-*+]\s+)/.test(trimmed)) {
+      const ordered = /^\d+\.\s+/.test(trimmed);
+      const items = [];
+      while (index < lines.length && /^(\d+\.\s+|[-*+]\s+)/.test(lines[index].trim())) {
+        const itemText = lines[index].trim().replace(/^(\d+\.\s+|[-*+]\s+)/, "");
+        items.push(itemText);
+        index += 1;
+      }
+      blocks.push(
+        `<${ordered ? "ol" : "ul"}>${items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</${ordered ? "ol" : "ul"}>`,
+      );
+      continue;
+    }
+
+    const paragraphLines = [];
+    while (index < lines.length) {
+      const current = lines[index];
+      const currentTrimmed = current.trim();
+      if (!currentTrimmed) {
+        break;
+      }
+      if (
+        /^#{1,6}\s+/.test(currentTrimmed)
+        || /^```/.test(currentTrimmed)
+        || /^~~~/.test(currentTrimmed)
+        || /^(-{3,}|\*{3,}|_{3,})$/.test(currentTrimmed)
+        || /^>\s?/.test(currentTrimmed)
+        || /^(\d+\.\s+|[-*+]\s+)/.test(currentTrimmed)
+        || (current.includes("|") && isTableDividerLine(lines[index + 1] || ""))
+      ) {
+        break;
+      }
+      paragraphLines.push(currentTrimmed);
+      index += 1;
+    }
+    flushParagraph(paragraphLines);
+    if (paragraphLines.length === 0 && index < lines.length && !lines[index].trim()) {
+      index += 1;
+    }
+  }
+
+  return `<div class="markdown-body">${blocks.join("")}</div>`;
+}
+
+function renderMarkdownWithCollapse(text, { threshold = 1600, label = "展开全文" } = {}) {
+  const source = String(text ?? "");
+  if (!source) {
+    return "";
+  }
+  if (source.length <= threshold) {
+    return renderMarkdown(source);
+  }
+  return `
+    <details class="markdown-collapse">
+      <summary>${escapeHtml(label)}</summary>
+      <div class="markdown-full">${renderMarkdown(source)}</div>
+    </details>
+  `;
 }
 
 function buildNowText() {
@@ -99,9 +360,20 @@ function autoResizeTextarea() {
 
 function getChatRequestTimeout({ hasFile, message }) {
   if (hasFile) {
-    return 90000;
+    return 120000;
   }
   const text = String(message || "").toLowerCase();
+  if (
+    text.includes("联网") ||
+    text.includes("搜索") ||
+    text.includes("查一下") ||
+    text.includes("查一查") ||
+    text.includes("最新") ||
+    text.includes("新闻") ||
+    text.includes("github")
+  ) {
+    return 90000;
+  }
   if (
     text.includes("预处理") ||
     text.includes("预测") ||
@@ -110,9 +382,20 @@ function getChatRequestTimeout({ hasFile, message }) {
     text.includes("基线") ||
     text.includes("去噪")
   ) {
-    return 60000;
+    return 120000;
   }
-  return 15000;
+  return 60000;
+}
+
+function formatResponseError(response = {}) {
+  const message = response.message || "请求没有完成";
+  const errorMessage = response.error_message || response.llm_error || "后端没有返回具体错误。";
+  const suggestion = response.suggestion || "";
+  const errorCode = response.error_code ? `（${response.error_code}）` : "";
+  if (response.error_code === "REQUEST_TIMEOUT" || String(errorMessage).includes("请求超时")) {
+    return `${message}${errorCode}：${errorMessage} 可以稍后查看最近记录或刷新工作区。`;
+  }
+  return `${message}${errorCode}：${errorMessage}${suggestion ? ` 建议：${suggestion}` : ""}`;
 }
 
 function scrollToBottom() {
@@ -173,55 +456,139 @@ function escapeOrFallback(value, fallback = "") {
   return text || fallback;
 }
 
+function resolveAssistantModelInfo(message = {}, fallback = {}) {
+  const raw = message.llm_model_info || fallback.llm_model_info || message.model_info || fallback.model_info || {};
+  const providerDisplayName = escapeOrFallback(raw.provider_display_name || raw.provider_name || raw.provider || "");
+  const modelDisplayName = escapeOrFallback(raw.model_display_name || raw.model_name || raw.model || "");
+  const displayName = escapeOrFallback(raw.display_name || (providerDisplayName && modelDisplayName ? `${providerDisplayName} · ${modelDisplayName}` : ""), "");
+  return {
+    provider: escapeOrFallback(raw.provider || ""),
+    provider_display_name: providerDisplayName,
+    model: escapeOrFallback(raw.model || ""),
+    model_display_name: modelDisplayName,
+    display_name: displayName,
+    available: raw.available,
+    reason: escapeOrFallback(raw.reason || ""),
+  };
+}
+
+function buildAssistantModelBadge(message = {}, fallback = {}) {
+  const modelInfo = resolveAssistantModelInfo(message, fallback);
+  if (!modelInfo.display_name) {
+    return "";
+  }
+  return `<div class="assistant-model-badge">由 ${escapeHtml(modelInfo.display_name)} 生成</div>`;
+}
+
 function buildAssistantSourceBadge(message = {}, fallback = {}) {
   if (!message) {
     return "";
   }
   const source = escapeOrFallback(message.source || fallback.source, "");
-  const skillName = escapeOrFallback(message.skill_name || message.analysis?.skill_name, "");
+  const toolName = escapeOrFallback(message.tool_used || fallback.tool_used || "", "");
+  const rawSkillName = escapeOrFallback(message.skill_name || message.analysis?.skill_name, "");
+  const skillName = rawSkillName === "web-search" ? "联网搜索" : rawSkillName;
   const actionName = escapeOrFallback(message.action_name || message.analysis?.action_name, "");
   const skillMode = escapeOrFallback(message.skill_mode || message.analysis?.skill_mode || fallback.skill_mode, "");
   const routeInfo = message.route_info || fallback.route_info || {};
   const route = escapeOrFallback(routeInfo.route, "");
   const reason = escapeOrFallback(routeInfo.reason, "");
-  const tags = [];
+  const fileName = escapeOrFallback(message.saved_file || message.file_name || message.analysis?.details?.saved_file || "", "");
+  const success = message.success !== undefined ? Boolean(message.success) : fallback.success;
+  const errorMessage = escapeOrFallback(message.error_message || message.llm_error || message.analysis?.details?.error_message || "", "");
+  const durationMs = Number(message.elapsed_ms || message.client_elapsed_ms || message.analysis?.details?.duration_ms || message.data?.duration_ms || fallback.client_elapsed_ms || 0);
 
-  if (source) {
-    tags.push(`<span class="skill-trace-tag">来源：${escapeHtml(source)}</span>`);
-  }
-  if (skillName) {
-    tags.push(`<span class="skill-trace-tag">Skill：${escapeHtml(skillName)}</span>`);
-  }
-  if (actionName) {
-    tags.push(`<span class="skill-trace-tag">Action：${escapeHtml(actionName)}</span>`);
-  }
-  if (skillMode) {
-    const modeLabel = skillMode === "prompt_only" ? "提示词型" : skillMode === "executable" ? "可执行型" : skillMode;
-    tags.push(`<span class="skill-trace-tag">模式：${escapeHtml(modeLabel)}</span>`);
-  }
-  if (route) {
-    tags.push(`<span class="skill-trace-tag">Route：${escapeHtml(route)}</span>`);
-  }
-  if (reason) {
-    tags.push(`<span class="skill-trace-tag muted">原因：${escapeHtml(reason)}</span>`);
+  const summaryParts = [];
+  if (skillName && actionName) {
+    summaryParts.push(`已调用 Skill：${skillName} · ${actionName}`);
+  } else if (skillName) {
+    summaryParts.push(`已调用 Skill：${skillName}`);
+  } else if (toolName) {
+    summaryParts.push(`已调用工具：${toolName}`);
   }
 
-  if (!tags.length) {
-    if (source === "llm_response") {
-      tags.push('<span class="skill-trace-tag">来源：大模型回复</span>');
-    } else if (source === "fallback") {
-      tags.push('<span class="skill-trace-tag">来源：兜底回复</span>');
-    }
-  }
-
-  if (!tags.length) {
+  if (!summaryParts.length) {
     return "";
   }
 
+  const detailRows = [];
+  if (source) {
+    detailRows.push(["来源", source]);
+  }
+  if (skillName) {
+    detailRows.push(["Skill", skillName]);
+  }
+  if (actionName) {
+    detailRows.push(["Action", actionName]);
+  }
+  if (skillMode) {
+    const modeLabel = skillMode === "prompt_only" ? "提示词型" : skillMode === "executable" ? "可执行型" : skillMode;
+    detailRows.push(["模式", modeLabel]);
+  }
+  if (fileName) {
+    detailRows.push(["文件", fileName]);
+  }
+  if (Number.isFinite(durationMs) && durationMs > 0) {
+    detailRows.push(["耗时", formatDurationMs(durationMs)]);
+  }
+  if (typeof success === "boolean") {
+    detailRows.push(["成功", success ? "是" : "否"]);
+  }
+  if (route) {
+    detailRows.push(["Route", route]);
+  }
+  if (reason) {
+    detailRows.push(["原因", reason]);
+  }
+  if (errorMessage) {
+    detailRows.push(["错误", errorMessage]);
+  }
+
   return `
-    <div class="skill-trace-banner" data-skill-trace>
-      <span class="skill-trace-title">本次回答使用了</span>
-      <div class="skill-trace-tags">${tags.join("")}</div>
+    <details class="skill-trace-banner" data-skill-trace>
+      <summary class="skill-trace-summary">
+        <span class="skill-trace-title">${escapeHtml(summaryParts.join(" "))}</span>
+        <span class="skill-trace-toggle"><span class="when-closed">展开详情</span><span class="when-open">收起详情</span></span>
+      </summary>
+      <div class="skill-trace-details">
+        ${detailRows
+          .map(
+            ([label, value]) => `
+              <div class="skill-trace-item">
+                <span>${escapeHtml(label)}</span>
+                <strong>${escapeHtml(value)}</strong>
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
+    </details>
+  `;
+}
+
+function renderWebSearchSources(payload = {}) {
+  const items = Array.isArray(payload.data?.items) ? payload.data.items : [];
+  if (payload.intent !== "web_search" || !items.length) {
+    return "";
+  }
+  const provider = escapeOrFallback(payload.data?.used_provider || payload.data?.provider || "", "");
+  const query = escapeOrFallback(payload.data?.query || payload.message || "", "");
+  return `
+    <div class="web-search-sources">
+      <strong>联网搜索来源</strong>
+      ${provider ? `<div class="web-search-meta">搜索提供商：${provider}</div>` : ""}
+      ${query ? `<div class="web-search-meta">搜索关键词：${query}</div>` : ""}
+      ${items
+        .slice(0, 5)
+        .map(
+          (item) => `
+            <a href="${escapeHtml(item.url || "#")}" target="_blank" rel="noopener noreferrer">
+              <span>${escapeHtml(item.title || "未命名结果")}</span>
+              ${item.snippet ? `<small>${escapeHtml(item.snippet)}</small>` : ""}
+            </a>
+          `,
+        )
+        .join("")}
     </div>
   `;
 }
@@ -629,6 +996,7 @@ function openModelList() {
     return;
   }
   state.modelListOpen = true;
+  renderModelList(state.llmModelsPayload);
   popover.classList.remove("hidden");
   popover.setAttribute("aria-hidden", "false");
 }
@@ -750,7 +1118,7 @@ function handleFileSelect(event) {
   }
 
   state.selectedFile = file;
-  console.log("已选择文件：", file.name);
+  debugLog("已选择文件：", file.name);
   renderSelectedFileChip(file);
 }
 
@@ -785,7 +1153,7 @@ async function uploadSkillZip(file) {
     if (!response.success) {
       throw new Error(response.error_message || "Skill 上传失败");
     }
-    console.log("Skill 上传成功：", response);
+    debugLog("Skill 上传成功：", response);
     window.alert(`${response.message || "Skill 上传成功"}${response.reload_required ? "，请刷新 Skills 列表查看待加载状态。" : ""}`);
     await loadSkillsSafely();
   } catch (error) {
@@ -841,9 +1209,28 @@ function renderListSection(title, items = [], emptyText = "当前未提供。") 
       <h4>${escapeHtml(title)}</h4>
       ${
         list.length
-          ? `<ul class="analysis-list compact">${list.map((item) => `<li>${escapeHtml(String(item))}</li>`).join("")}</ul>`
+          ? `<ul class="analysis-list compact">${list.map((item) => `<li>${renderInlineMarkdown(String(item))}</li>`).join("")}</ul>`
           : `<div class="analysis-empty">${escapeHtml(emptyText)}</div>`
       }
+    </section>
+  `;
+}
+
+function renderNarrativeBlock(text, { collapse = false, threshold = 1200 } = {}) {
+  const content = String(text ?? "").trim();
+  if (!content) {
+    return "";
+  }
+  if (collapse) {
+    return `
+      <section class="analysis-summary markdown-summary">
+        ${renderMarkdownWithCollapse(content, { threshold, label: "展开全文" })}
+      </section>
+    `;
+  }
+  return `
+    <section class="analysis-summary markdown-summary">
+      ${renderMarkdown(content)}
     </section>
   `;
 }
@@ -925,9 +1312,9 @@ function renderPreprocessingResult(message) {
   const overlayPlot = plots.find((item) => item?.kind === "overlay");
   return `
     <div class="analysis-card">
-      <div class="analysis-summary">
+      <div class="analysis-summary report-title">
         <p><strong>光谱预处理完成</strong></p>
-        <p>${escapeHtml(message?.content || analysis.summary || "预处理完成。")}</p>
+        ${renderNarrativeBlock(message?.content || analysis.summary || "预处理完成。")}
       </div>
       ${
         steps.length
@@ -935,7 +1322,7 @@ function renderPreprocessingResult(message) {
             <div class="analysis-summary">
               <p><strong>处理步骤</strong></p>
               <ul class="analysis-list">
-                ${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}
+                ${steps.map((step) => `<li>${renderInlineMarkdown(step)}</li>`).join("")}
               </ul>
             </div>
           `
@@ -979,7 +1366,7 @@ function renderPreprocessingResult(message) {
       }
       ${renderMetricGrid(analysis.metrics || {})}
       ${renderPlots(analysis.plots || [])}
-      ${warnings.length ? `<div class="analysis-summary"><p><strong>提示：</strong>${escapeHtml(warnings.join("；"))}</p></div>` : ""}
+      ${warnings.length ? `<div class="analysis-summary soft"><p><strong>注意事项</strong></p><ul class="analysis-list compact">${warnings.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</ul></div>` : ""}
     </div>
   `;
 }
@@ -1052,7 +1439,7 @@ function renderPredictionResult(message) {
       </div>
       <div class="analysis-summary soft">
         <p><strong>补充说明</strong></p>
-        <p>${escapeHtml(structured.explanation_text || message?.content || analysis.summary || "预测完成。")}</p>
+        ${renderNarrativeBlock(structured.explanation_text || message?.content || analysis.summary || "预测完成。")}
       </div>
       ${renderPlots(analysis.plots || [])}
     </div>
@@ -1065,29 +1452,103 @@ function renderUploadedSkillResult(message) {
   const summary = analysis.summary || message?.content || details.analysis_summary || "文件分析完成。";
   const keyPoints = Array.isArray(details.key_points) ? details.key_points : [];
   const warnings = Array.isArray(details.warnings) ? details.warnings : [];
+  const actionItems = Array.isArray(details.action_items) ? details.action_items : [];
+  const findings = Array.isArray(details.findings) ? details.findings : [];
+  const metadata = details.metadata && typeof details.metadata === "object" ? details.metadata : {};
+  const entities = details.entities && typeof details.entities === "object" ? details.entities : {};
+  const documentType = String(details.document_type || details.task_type || details.file_type || "").trim();
+  const fieldCandidates = [
+    ...(Array.isArray(entities.variables_or_fields) ? entities.variables_or_fields : []),
+    ...(Array.isArray(details.key_fields) ? details.key_fields : []),
+  ].filter(Boolean);
   return `
     <div class="analysis-card">
-      <div class="analysis-summary">
-        <p><strong>文件分析</strong></p>
-        <p>${escapeHtml(summary)}</p>
+      <div class="analysis-summary report-title">
+        <p><strong>文件分析结果</strong></p>
+        ${renderNarrativeBlock(summary, { collapse: true, threshold: 1000 })}
       </div>
+      ${
+        documentType
+          ? `<div class="skill-result-block markdown-summary"><strong>文档类型：</strong>${escapeHtml(documentType)}</div>`
+          : ""
+      }
+      ${
+        metadata.line_count || metadata.char_count
+          ? `
+            <div class="detail-list">
+              ${metadata.line_count ? `<div class="detail-item"><span>行数</span><strong>${escapeHtml(String(metadata.line_count))}</strong></div>` : ""}
+              ${metadata.char_count ? `<div class="detail-item"><span>字符数</span><strong>${escapeHtml(String(metadata.char_count))}</strong></div>` : ""}
+            </div>
+          `
+          : ""
+      }
+      ${
+        fieldCandidates.length
+          ? `
+            <section class="explanation-card">
+              <h4>关键字段</h4>
+              <ul class="analysis-list compact">
+                ${fieldCandidates.slice(0, 10).map((item) => `<li>${renderInlineMarkdown(String(item))}</li>`).join("")}
+              </ul>
+            </section>
+          `
+          : ""
+      }
+      ${
+        findings.length
+          ? `
+            <section class="explanation-card">
+              <h4>主要内容</h4>
+              <div class="detail-list">
+                ${findings.slice(0, 6).map((finding) => {
+                  const label = finding.label || finding.title || finding.name || "内容";
+                  const value = finding.value || finding.description || finding.detail || finding.text || finding.summary || "";
+                  return `<div class="detail-item"><span>${escapeHtml(String(label))}</span><strong>${renderInlineMarkdown(String(value || "未提供"))}</strong></div>`;
+                }).join("")}
+              </div>
+            </section>
+          `
+          : ""
+      }
       ${
         keyPoints.length
           ? `
-            <div class="detail-list">
-              ${keyPoints.map((item) => `<div class="detail-item"><span>要点</span><strong>${escapeHtml(item)}</strong></div>`).join("")}
-            </div>
+            <section class="explanation-card">
+              <h4>关键要点</h4>
+              <ul class="analysis-list compact">
+                ${keyPoints.map((item) => `<li>${renderInlineMarkdown(String(item))}</li>`).join("")}
+              </ul>
+            </section>
+          `
+          : ""
+      }
+      ${
+        actionItems.length
+          ? `
+            <section class="explanation-card">
+              <h4>建议</h4>
+              <ul class="analysis-list compact">
+                ${actionItems.map((item) => `<li>${renderInlineMarkdown(String(item))}</li>`).join("")}
+              </ul>
+            </section>
           `
           : ""
       }
       ${
         warnings.length
           ? `
-            <div class="analysis-summary soft">
-              <p><strong>提示</strong></p>
-              <p>${escapeHtml(warnings.join("；"))}</p>
-            </div>
+            <section class="analysis-summary soft">
+              <p><strong>注意事项</strong></p>
+              <ul class="analysis-list compact">
+                ${warnings.map((item) => `<li>${renderInlineMarkdown(String(item))}</li>`).join("")}
+              </ul>
+            </section>
           `
+          : ""
+      }
+      ${
+        message?.content && String(message.content).trim() && String(message.content).trim() !== String(summary).trim()
+          ? `<details class="markdown-collapse"><summary>展开全文</summary>${renderNarrativeBlock(message.content, { collapse: false })}</details>`
           : ""
       }
     </div>
@@ -1101,7 +1562,7 @@ function renderModelStatusResult(message) {
     <div class="analysis-card">
       <div class="analysis-summary">
         <p><strong>模型状态检查</strong></p>
-        <p>${escapeHtml(message?.content || analysis.summary || "模型状态已更新。")}</p>
+        ${renderNarrativeBlock(message?.content || analysis.summary || "模型状态已更新。")}
       </div>
       <div class="detail-list">
         ${(analysis.model_name || analysis.model_version) ? `<div class="detail-item"><span>当前模型</span><strong>${escapeHtml(analysis.model_name || analysis.model_version)}</strong></div>` : ""}
@@ -1117,9 +1578,9 @@ function renderReportResult(message) {
   const analysis = message?.analysis || {};
   return `
     <div class="analysis-card">
-      <div class="analysis-summary">
+      <div class="analysis-summary report-title">
         <p><strong>报告生成结果</strong></p>
-        <p>${escapeHtml(message?.content || analysis.summary || "报告已生成。")}</p>
+        ${renderNarrativeBlock(message?.content || analysis.summary || "报告已生成。")}
       </div>
       <div class="detail-list">
         ${analysis.report_path ? `<div class="detail-item"><span>报告路径</span><strong>${escapeHtml(analysis.report_path)}</strong></div>` : ""}
@@ -1134,8 +1595,8 @@ function renderGenericAnalysisResult(message) {
   const analysis = message?.analysis || {};
   return `
     <div class="analysis-card">
-      <div class="analysis-summary">
-        <p>${escapeHtml(message?.content || analysis.summary || "处理完成。")}</p>
+      <div class="analysis-summary report-title">
+        ${renderNarrativeBlock(message?.content || analysis.summary || "处理完成。", { collapse: true, threshold: 900 })}
       </div>
       ${renderDetailRows("", analysis.details || {})}
     </div>
@@ -1145,100 +1606,309 @@ function renderGenericAnalysisResult(message) {
 function renderAssistantResponse(payload) {
   const messages = Array.isArray(payload?.messages) ? payload.messages : [];
   messages.forEach((message) => {
+    const modelBadge = buildAssistantModelBadge(message, payload);
     if (message.type === "analysis") {
       const kind = message.result_kind || message.analysis?.result_kind || "generic";
       const traceBanner = buildAssistantSourceBadge(message, payload);
       if (kind === "preprocessing") {
-        appendMessage("assistant", `${traceBanner}${renderPreprocessingResult(message)}`, "analysis");
+        appendMessage("assistant", `${modelBadge}${traceBanner}${renderPreprocessingResult(message)}`, "analysis");
         return;
       }
       if (kind === "prediction") {
-        appendMessage("assistant", `${traceBanner}${renderPredictionResult(message)}`, "analysis");
+        appendMessage("assistant", `${modelBadge}${traceBanner}${renderPredictionResult(message)}`, "analysis");
         return;
       }
       if (kind === "model_status") {
-        appendMessage("assistant", `${traceBanner}${renderModelStatusResult(message)}`, "analysis");
+        appendMessage("assistant", `${modelBadge}${traceBanner}${renderModelStatusResult(message)}`, "analysis");
         return;
       }
       if (kind === "report") {
-        appendMessage("assistant", `${traceBanner}${renderReportResult(message)}`, "analysis");
+        appendMessage("assistant", `${modelBadge}${traceBanner}${renderReportResult(message)}`, "analysis");
         return;
       }
       if (kind === "uploaded_skill") {
-        appendMessage("assistant", `${traceBanner}${renderUploadedSkillResult(message)}`, "analysis");
+        appendMessage("assistant", `${modelBadge}${traceBanner}${renderUploadedSkillResult(message)}`, "analysis");
         return;
       }
-      appendMessage("assistant", `${traceBanner}${renderGenericAnalysisResult(message)}`, "analysis");
+      appendMessage("assistant", `${modelBadge}${traceBanner}${renderGenericAnalysisResult(message)}`, "analysis");
       return;
     }
     if (message.type === "error") {
-      appendMessage("assistant", `${buildAssistantSourceBadge(message, payload)}<p class="error-message">${escapeHtml(message.content || "分析失败。")}</p>`, "error");
+      appendMessage("assistant", `${modelBadge}${buildAssistantSourceBadge(message, payload)}<p class="error-message">${renderInlineMarkdown(message.content || "分析失败。")}</p>`, "error");
       return;
     }
-    appendMessage("assistant", `${buildAssistantSourceBadge(message, payload)}<p>${escapeHtml(message.content || "")}</p>`, "text");
+    appendMessage("assistant", `${modelBadge}${buildAssistantSourceBadge(message, payload)}${renderMarkdown(message.content || "")}${renderWebSearchSources(payload)}`, "text");
   });
 }
 
-function renderModelList(models = [], currentModel = "") {
+function renderModelList(payload = {}) {
   const body = $("modelListBody");
   if (!body) {
     return;
   }
-  if (!models.length) {
+  const providers = Array.isArray(payload?.providers) ? payload.providers : [];
+  const models = Array.isArray(payload?.models) ? payload.models : [];
+  const current = payload?.current || {};
+  const selectedProviderId = payload?.selectedProviderId || current.provider_id || "";
+  const currentDisplay = current.provider_name && current.model_id
+    ? `${current.provider_name} / ${current.model_id}`
+    : "未选择";
+  if (!providers.length) {
     body.innerHTML = `<div class="model-list-empty">当前没有可展示的模型。</div>`;
     return;
   }
-  body.innerHTML = models
-    .map((model) => {
-      const selected = model.name === currentModel;
-      return `
-        <button
-          type="button"
-          class="model-list-item ${selected ? "selected" : ""}"
-          data-model-name="${escapeHtml(model.name || "")}"
-          ${model.available ? "" : "disabled"}
-        >
-          <div class="model-list-main">
-            <div class="model-list-title">
-              <strong>${escapeHtml(model.display_name || model.name || "未命名模型")}</strong>
-              <span class="model-list-check">${selected ? "√" : ""}</span>
-            </div>
-            <div class="model-list-meta">
-              ${selected ? '<span class="model-badge">已选中</span>' : ""}
-              <span class="model-badge ${model.available ? "ok" : "warn"}">${model.available ? "可用" : "不可用"}</span>
-            </div>
-            <p>${escapeHtml(model.description || "暂无描述")}</p>
-          </div>
-        </button>
-      `;
-    })
-    .join("");
+  body.innerHTML = `
+    <div class="model-current-summary">
+      <span>当前平台</span>
+      <strong>${escapeHtml(current.provider_name || "未选择")}</strong>
+      <span>当前模型</span>
+      <strong>${escapeHtml(current.model_id || "未选择")}</strong>
+    </div>
+    <div class="provider-model-grid">
+      <section class="model-provider-column">
+        ${providers
+          .map((provider) => `
+            <button
+              type="button"
+              class="provider-list-item ${provider.provider_id === selectedProviderId ? "active" : ""}"
+              data-provider-select="${escapeHtml(provider.provider_id || "")}"
+            >
+              <strong>${escapeHtml(provider.display_name || provider.provider_id || "平台")}</strong>
+              <span>${provider.configured || provider.provider_id === "ollama" ? "可用" : "未配置"}</span>
+              ${provider.reason ? `<p class="model-list-reason">${escapeHtml(provider.reason)}</p>` : ""}
+            </button>
+          `)
+          .join("")}
+      </section>
+      <section class="model-provider-group">
+        <div class="model-provider-head">${escapeHtml(providers.find((item) => item.provider_id === selectedProviderId)?.display_name || "请选择平台")}</div>
+        <div class="model-provider-list">
+          ${models.length
+            ? models
+                .map((model) => {
+                  const selected = Boolean(model.selected);
+                  return `
+                    <button
+                      type="button"
+                      class="model-list-item ${selected ? "selected" : ""}"
+                      data-provider="${escapeHtml(selectedProviderId)}"
+                      data-model="${escapeHtml(model.id || "")}"
+                    >
+                      <div class="model-list-title">
+                        <strong>${escapeHtml(model.display_name || model.id || "未命名模型")}</strong>
+                        <span class="model-list-check">${selected ? "√" : ""}</span>
+                      </div>
+                      <div class="model-list-meta">
+                        <span class="model-badge">${escapeHtml(model.id || "")}</span>
+                      </div>
+                    </button>
+                  `;
+                })
+                .join("")
+            : `<div class="model-list-empty">当前平台下没有可展示的模型。</div>`}
+        </div>
+      </section>
+    </div>
+  `;
 
-  body.querySelectorAll("[data-model-name]").forEach((button) => {
+  body.querySelectorAll("[data-provider-select]").forEach((button) => {
     button.addEventListener("click", async () => {
-      await switchModel(button.dataset.modelName || "");
+      const selectedProvider = providers.find((item) => item.provider_id === (button.dataset.providerSelect || ""));
+      if (selectedProvider && !selectedProvider.configured && selectedProvider.provider_id !== "ollama") {
+        showToast(
+          `当前平台 API Key 未配置，请先在 .env 中填写 ${selectedProvider.api_key_env || "对应 API Key"}`,
+          "info",
+        );
+      }
+      await loadProviderModelsSafely(button.dataset.providerSelect || "");
+    });
+  });
+  body.querySelectorAll("[data-provider][data-model]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await switchModel(button.dataset.provider || "", button.dataset.model || "");
     });
   });
 }
 
-async function switchModel(modelName) {
-  if (!modelName) {
+function renderWorkspacePanel() {
+  const body = $("workspacePanelBody");
+  if (!body) {
+    return;
+  }
+  const files = state.workspacePayload.files || {};
+  const context = state.workspacePayload.context || {};
+  const tasks = Array.isArray(state.workspacePayload.tasks?.tasks) ? state.workspacePayload.tasks.tasks : [];
+  const taskTraces = state.workspacePayload.taskTraces || {};
+  const messages = Array.isArray(state.workspacePayload.messages?.messages) ? state.workspacePayload.messages.messages : [];
+  const renderFileList = (items = [], emptyText) => {
+    if (!items.length) {
+      return `<div class="workspace-empty">${escapeHtml(emptyText)}</div>`;
+    }
+    return `
+      <div class="workspace-file-list">
+        ${items
+          .map(
+            (item) => `
+              <div class="workspace-file-item">
+                <strong>${escapeHtml(item.original_name || item.filename || "未命名文件")}</strong>
+                <span>${escapeHtml(item.mime_type || "unknown")} · ${escapeHtml(String(item.size || 0))} bytes</span>
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
+    `;
+  };
+  const renderTasks = () => {
+    if (!tasks.length) {
+      return `<div class="workspace-empty">当前会话还没有任务执行记录。</div>`;
+    }
+    return `
+      <div class="workspace-task-list">
+        ${tasks
+          .slice()
+          .reverse()
+          .map(
+            (task) => `
+              <article class="workspace-task-card ${task.status === "failed" ? "failed" : ""}">
+                <div class="workspace-task-head">
+                  <strong>${escapeHtml(task.intent || "unknown")}</strong>
+                  <span>${escapeHtml(task.status || "unknown")}</span>
+                </div>
+                ${task.selected_skill ? `<p>已选择 Skill：${escapeHtml(task.selected_skill)}</p>` : ""}
+                ${task.selected_ability ? `<p>已执行能力：${escapeHtml(task.selected_ability)}</p>` : ""}
+                ${
+                  Array.isArray(taskTraces[task.task_id]?.steps) && taskTraces[task.task_id].steps.length
+                    ? `<div class="workspace-step-list">${taskTraces[task.task_id].steps
+                        .map((step) => `<div><span>${escapeHtml(step.status || "")}</span><strong>${escapeHtml(step.name || "")}</strong></div>`)
+                        .join("")}</div>`
+                    : ""
+                }
+                ${
+                  Array.isArray(taskTraces[task.task_id]?.skill_runs) && taskTraces[task.task_id].skill_runs.length
+                    ? `<div class="workspace-skillrun-list">${taskTraces[task.task_id].skill_runs
+                        .map(
+                          (run) => `
+                            <div class="workspace-skillrun-card ${run.status === "failed" ? "failed" : ""}">
+                              <strong>${escapeHtml(run.skill_name || "Skill")}</strong>
+                              <span>${escapeHtml(run.ability_name || "default")} · ${escapeHtml(run.status || "")}</span>
+                              ${run.raw_result_summary ? `<p>${escapeHtml(run.raw_result_summary)}</p>` : ""}
+                            </div>
+                          `,
+                        )
+                        .join("")}</div>`
+                    : ""
+                }
+                ${
+                  Array.isArray(task.output_files) && task.output_files.length
+                    ? `<p>已生成结果：${task.output_files.map((item) => escapeHtml(item.filename || item.path || "output")).join("、")}</p>`
+                    : ""
+                }
+                ${task.error_message ? `<p class="error-message">失败原因：${escapeHtml(task.error_message)}</p><p>建议操作：检查输入文件、API Key 或 Skill 配置后重试。</p>` : ""}
+              </article>
+            `,
+          )
+          .join("")}
+      </div>
+    `;
+  };
+  body.innerHTML = `
+    <section class="workspace-section">
+      <h3>上下文</h3>
+      <div class="workspace-context-card">
+        <p><strong>会话：</strong>${escapeHtml(state.sessionId || "未创建")}</p>
+        <p><strong>活跃文件：</strong>${escapeHtml(String((context.active_files || []).length || 0))}</p>
+        <details>
+          <summary>查看摘要</summary>
+          ${renderMarkdownWithCollapse(context.context_summary || "暂无上下文摘要。", { threshold: 600, label: "展开摘要" })}
+        </details>
+      </div>
+    </section>
+    <section class="workspace-section">
+      <h3>Uploads</h3>
+      ${renderFileList(files.uploads || [], "还没有上传文件。")}
+    </section>
+    <section class="workspace-section">
+      <h3>Outputs</h3>
+      ${renderFileList(files.outputs || [], "还没有输出文件。")}
+    </section>
+    <section class="workspace-section">
+      <h3>任务执行记录</h3>
+      ${renderTasks()}
+    </section>
+    <section class="workspace-section">
+      <h3>最近消息</h3>
+      ${
+        messages.length
+          ? `<div class="workspace-message-list">${messages
+              .slice()
+              .reverse()
+              .map((item) => `<div class="workspace-message-item"><span>${escapeHtml(item.role || "")}</span><p>${escapeHtml(item.content || "")}</p></div>`)
+              .join("")}</div>`
+          : `<div class="workspace-empty">暂无消息日志。</div>`
+      }
+    </section>
+  `;
+}
+
+async function refreshWorkspacePanel() {
+  if (!state.sessionId) {
+    renderWorkspacePanel();
+    return;
+  }
+  const [files, context, tasks, messages] = await Promise.all([
+    getWorkspaceFiles(state.sessionId, state.userId),
+    getWorkspaceContext(state.sessionId, state.userId),
+    getConversationTasks(state.sessionId, state.userId),
+    getConversationMessages(state.sessionId, state.userId, 20),
+  ]);
+  const taskItems = Array.isArray(tasks?.tasks) ? tasks.tasks : [];
+  const traceResults = await Promise.allSettled(taskItems.slice(-8).map((task) => getTaskTrace(task.task_id)));
+  const taskTraces = {};
+  traceResults.forEach((result) => {
+    if (result.status === "fulfilled" && result.value?.success && result.value.task?.task_id) {
+      taskTraces[result.value.task.task_id] = result.value;
+    }
+  });
+  state.workspacePayload = { files, context, tasks, messages, taskTraces };
+  renderWorkspacePanel();
+}
+
+async function openWorkspacePanel() {
+  state.workspaceOpen = true;
+  $("workspacePanel")?.classList.remove("hidden");
+  $("workspacePanel")?.setAttribute("aria-hidden", "false");
+  await refreshWorkspacePanel();
+}
+
+function closeWorkspacePanel() {
+  state.workspaceOpen = false;
+  $("workspacePanel")?.classList.add("hidden");
+  $("workspacePanel")?.setAttribute("aria-hidden", "true");
+}
+
+async function switchModel(provider, model) {
+  if (!provider || !model) {
     return;
   }
   try {
-    console.log("开始切换模型：", modelName);
-    const response = await switchAgentModel(modelName);
+    debugLog("开始切换大模型：", provider, model);
+    const targetProvider = (state.llmModelsPayload.providers || []).find((item) => item.provider_id === provider);
+    if (targetProvider && !targetProvider.configured && provider !== "ollama") {
+      throw new Error(`当前平台 API Key 未配置，请先在 .env 中填写 ${targetProvider.api_key_env || "对应 API Key"}`);
+    }
+    const response = await switchLlmModel(provider, model, state.sessionId || null, state.userId);
     if (!response.success) {
       throw new Error(response.error_message || "切换模型失败");
     }
-    state.currentModel = { ...(state.currentModel || {}), model_version: response.current_model };
-    $("topModelVersion").textContent = response.current_model || "未知";
-    await Promise.allSettled([loadModelsSafely(), loadStatusSafely()]);
-    renderModelList(state.modelsPayload.models || [], response.current_model || "");
-    console.log("模型切换完成：", response);
+    await Promise.allSettled([loadLlmModelsSafely(provider)]);
+    renderModelList(state.llmModelsPayload);
+    $("topLlmModel").textContent = `${response.provider_name || provider} / ${response.model_id || model}`;
+    showToast(`已切换到：${response.provider_name || provider} / ${response.model_id || model}`, "success");
+    debugLog("大模型切换完成：", response);
   } catch (error) {
     console.error("切换模型失败：", error);
-    window.alert(`切换模型失败：${error.message || "未知错误"}`);
+    showToast(`切换失败：${error.message || "未知错误"}`, "error");
   }
 }
 
@@ -1260,7 +1930,7 @@ function bindComposerEvents() {
   fileButton.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    console.log("点击了 + 上传按钮");
+    debugLog("点击了 + 上传按钮");
     fileInput.click();
   });
 
@@ -1296,6 +1966,13 @@ function bindPageEvents() {
   $("refreshSkillsBtn")?.addEventListener("click", refreshSkillsPanel);
   $("uploadSkillBtn")?.addEventListener("click", () => $("skillZipInput")?.click());
   $("skillZipInput")?.addEventListener("change", handleSkillZipSelect);
+  $("workspaceButton")?.addEventListener("click", openWorkspacePanel);
+  $("closeWorkspacePanelBtn")?.addEventListener("click", closeWorkspacePanel);
+  $("workspacePanelBackdrop")?.addEventListener("click", closeWorkspacePanel);
+  $("refreshWorkspaceBtn")?.addEventListener("click", async () => {
+    await refreshWorkspacePanel();
+    showToast("已刷新工作区", "info");
+  });
 
   $("modelListBtn")?.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -1306,6 +1983,17 @@ function bindPageEvents() {
     }
   });
   $("closeModelListBtn")?.addEventListener("click", closeModelList);
+  $("refreshModelListBtn")?.addEventListener("click", async () => {
+    const response = await refreshLlmModels();
+    if (!response.success) {
+      showToast(response.message || response.error_message || "刷新失败", "error");
+    }
+    await loadLlmModelsSafely();
+    if (state.modelListOpen) {
+      renderModelList(state.llmModelsPayload);
+    }
+    showToast(response.message || "已刷新大模型列表", "info");
+  });
   $("recentExperimentBtn")?.addEventListener("click", () => sendChatMessage("最近记录"));
   $("refreshDashboardBtn")?.addEventListener("click", refreshDashboard);
 
@@ -1319,20 +2007,21 @@ function bindPageEvents() {
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       closeSkillsPanel();
+      closeWorkspacePanel();
       closeModelList();
     }
   });
 }
 
-async function loadStatus() {
-  const currentModelResponse = await getCurrentModel();
+async function loadRamanStatus() {
+  const currentModelResponse = await getCurrentRamanModel();
   if (!currentModelResponse.success) {
     throw new Error(currentModelResponse.error_message || "获取当前模型失败");
   }
 
   state.currentModel = currentModelResponse.data || {};
   $("backendStatus").textContent = "已连接";
-  $("topModelVersion").textContent = state.currentModel.model_version || state.modelsPayload.current_model || "未知";
+  $("topRamanModel").textContent = state.currentModel.model_version || "未知";
 
   const artifactResponse = await checkCurrentModel(state.currentModel.model_version);
   if (!artifactResponse.success) {
@@ -1344,32 +2033,64 @@ async function loadStatus() {
   $("topArtifactStatus").textContent = missingFiles.length ? `缺失 ${missingFiles.length} 个` : "正常";
 }
 
-async function loadStatusSafely() {
+async function loadRamanStatusSafely() {
   try {
-    await loadStatus();
+    await loadRamanStatus();
   } catch (error) {
     console.error("加载状态失败：", error);
     $("backendStatus").textContent = "连接异常";
-    $("topModelVersion").textContent = state.modelsPayload.current_model || "加载失败";
+    $("topRamanModel").textContent = "加载失败";
     $("topArtifactStatus").textContent = "检查失败";
   }
 }
 
-async function loadModels() {
-  const response = await getAgentModels();
-  if (!response.success) {
-    throw new Error(response.error_message || "加载模型列表失败");
-  }
-  state.modelsPayload = response;
-  renderModelList(response.models || [], response.current_model || "");
-  if (response.current_model) {
-    $("topModelVersion").textContent = response.current_model;
+async function loadLlmModels() {
+  return loadLlmModelsSafely();
+}
+
+async function loadProviderModelsSafely(providerId) {
+  try {
+    const targetProviderId = providerId || state.llmModelsPayload.selectedProviderId || state.llmModelsPayload.current?.provider_id || "sensenova";
+    const modelsResponse = await getProviderModels(targetProviderId, state.sessionId || null, state.userId);
+    if (!modelsResponse.success) {
+      throw new Error(modelsResponse.error_message || "加载平台模型失败");
+    }
+    state.llmModelsPayload.selectedProviderId = targetProviderId;
+    state.llmModelsPayload.models = Array.isArray(modelsResponse.items) ? modelsResponse.items : [];
+    renderModelList(state.llmModelsPayload);
+  } catch (error) {
+    console.error("加载平台模型失败：", error);
+    showToast(`加载模型失败：${error.message || "未知错误"}`, "error");
   }
 }
 
-async function loadModelsSafely() {
+async function loadLlmModelsSafely(preferredProviderId = "") {
   try {
-    await loadModels();
+    const [providersResponse, currentResponse] = await Promise.all([
+      getModelProviders(),
+      getCurrentLlmModel(state.sessionId || null, state.userId),
+    ]);
+    if (!providersResponse.success) {
+      throw new Error(providersResponse.error_message || "加载平台列表失败");
+    }
+    if (!currentResponse.success) {
+      throw new Error(currentResponse.error_message || "加载当前模型失败");
+    }
+    const providers = Array.isArray(providersResponse.items) ? providersResponse.items : [];
+    const current = currentResponse;
+    const selectedProviderId = preferredProviderId || current.provider_id || providers[0]?.provider_id || "sensenova";
+    const modelsResponse = await getProviderModels(selectedProviderId, state.sessionId || null, state.userId);
+    if (!modelsResponse.success) {
+      throw new Error(modelsResponse.error_message || "加载模型列表失败");
+    }
+    state.llmModelsPayload = {
+      providers,
+      current,
+      selectedProviderId,
+      models: Array.isArray(modelsResponse.items) ? modelsResponse.items : [],
+    };
+    renderModelList(state.llmModelsPayload);
+    $("topLlmModel").textContent = `${current.provider_name || "未知平台"} / ${current.model_id || "未知模型"}`;
   } catch (error) {
     console.error("加载模型列表失败：", error);
     const body = $("modelListBody");
@@ -1414,17 +2135,20 @@ async function refreshDashboard() {
     button.disabled = true;
     button.textContent = "刷新中...";
   }
-  console.log("开始刷新工作台信息");
-  const results = await Promise.allSettled([loadStatusSafely(), loadModelsSafely(), loadSkillsSafely()]);
+  debugLog("开始刷新工作台信息");
+  const results = await Promise.allSettled([loadRamanStatusSafely(), loadLlmModelsSafely(), loadSkillsSafely()]);
+  if (state.workspaceOpen) {
+    await refreshWorkspacePanel();
+  }
   results.forEach((result, index) => {
     if (result.status === "rejected") {
       console.error(`刷新任务 ${index + 1} 失败：`, result.reason);
     }
   });
   if (state.modelListOpen) {
-    renderModelList(state.modelsPayload.models || [], state.modelsPayload.current_model || "");
+    renderModelList(state.llmModelsPayload);
   }
-  console.log("工作台刷新完成");
+  debugLog("工作台刷新完成");
   state.refreshingDashboard = false;
   if (button) {
     button.disabled = false;
@@ -1461,32 +2185,53 @@ async function sendChatMessage(presetMessage = "") {
   renderTypingMessage(selectedFile ? "正在分析文件内容，可能需要几十秒，请稍候..." : "正在处理，请稍候...");
 
   try {
+    const requestStartedAt = performance.now();
+    const currentLlm = state.llmModelsPayload.current || {};
     const response = await sendAgentChat({
       message,
       sessionId: state.sessionId || "",
+      userId: state.userId,
       debug: $("chatDebug")?.checked || false,
       file: selectedFile,
-      metadata: { remarks: "", timeoutMs },
+      metadata: {
+        remarks: "",
+        timeoutMs,
+        providerId: currentLlm.provider_id || undefined,
+        modelId: currentLlm.model_id || undefined,
+      },
     });
+    response.client_elapsed_ms = Math.round(performance.now() - requestStartedAt);
 
     removeTypingMessage();
     setBusy(false);
 
-    if (response.session_id) {
-      persistSessionId(response.session_id);
+    if (response.conversation_id || response.session_id) {
+      state.sessionId = response.conversation_id || response.session_id;
+      persistSessionId(state.sessionId);
     }
 
     if (!response.success) {
-      console.error("发送消息失败：", response.error_message || "处理失败，请检查后端日志");
-      const errorText = String(response.error_message || "处理失败，请检查后端日志");
-      const friendlyMessage = errorText.includes("请求超时")
-        ? `处理失败：${escapeHtml(errorText)}。当前任务可能仍在后台处理中，你可以稍后重试，已选择的文件会保留。`
-        : `处理失败：${escapeHtml(errorText)}`;
+      console.error("发送消息失败：", response);
+      const friendlyMessage = escapeHtml(formatResponseError(response));
       appendMessage("assistant", `<p class="error-message">${friendlyMessage}</p>`, "error");
       return;
     }
 
     renderAssistantResponse(response);
+    const responseModelInfo = response.model_info || response.llm_model_info || {};
+    const usedProviderId = response.provider_id || responseModelInfo.provider || responseModelInfo.provider_id;
+    const usedModelId = response.model_id || responseModelInfo.model || responseModelInfo.model_id;
+    const usedProviderName = responseModelInfo.provider_display_name || responseModelInfo.provider_name || usedProviderId;
+    if (usedProviderId && usedModelId) {
+      state.llmModelsPayload.current = {
+        ...(state.llmModelsPayload.current || {}),
+        provider_id: usedProviderId,
+        provider_name: usedProviderName,
+        model_id: usedModelId,
+        model_name: responseModelInfo.model_display_name || responseModelInfo.model_name || usedModelId,
+      };
+      $("topLlmModel").textContent = `${usedProviderName || "未知平台"} / ${usedModelId}`;
+    }
     state.selectedFile = null;
     const fileInput = $("fileInput");
     if (fileInput) {
@@ -1497,7 +2242,10 @@ async function sendChatMessage(presetMessage = "") {
       input.value = "";
     }
     autoResizeTextarea();
-    loadStatusSafely();
+    loadRamanStatusSafely();
+    if (state.workspaceOpen) {
+      refreshWorkspacePanel();
+    }
   } catch (error) {
     removeTypingMessage();
     setBusy(false);
@@ -1522,8 +2270,8 @@ function initApp() {
   renderWelcomeMessage();
   autoResizeTextarea();
   setChatStatus(state.sessionId ? `当前会话：${state.sessionId}` : "可以直接提问，或上传任意文件后发送。");
-  loadModelsSafely();
-  loadStatusSafely();
+  loadLlmModelsSafely();
+  loadRamanStatusSafely();
   loadSkillsSafely();
 }
 

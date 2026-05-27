@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
+from backend.services.workspace_manager import DEFAULT_USER_ID, WorkspaceManager
 from raman_core.methanol.config import REPORT_DIR, ensure_dirs
 
 
 router = APIRouter(prefix="/api/files", tags=["files"])
+workspace_manager = WorkspaceManager()
 
 
 def validate_report_file_name(report_file: str) -> str:
@@ -44,3 +46,27 @@ def download_report(report_file: str):
         media_type="text/markdown; charset=utf-8",
         filename=safe_name,
     )
+
+
+@router.post("/upload")
+async def upload_workspace_file(
+    file: UploadFile = File(...),
+    user_id: str = Form(default=DEFAULT_USER_ID),
+    conversation_id: str | None = Form(default=None),
+) -> dict:
+    """上传文件到当前 conversation workspace。"""
+    workspace = workspace_manager.create_workspace(user_id, conversation_id)
+    try:
+        info = await workspace_manager.save_upload_file(
+            workspace["user_id"],
+            workspace["conversation_id"],
+            file,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "success": True,
+        "user_id": workspace["user_id"],
+        "conversation_id": workspace["conversation_id"],
+        **info,
+    }

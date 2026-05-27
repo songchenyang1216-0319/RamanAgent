@@ -15,6 +15,14 @@ _predictor_instance = None
 _predictor_model_version = None
 
 
+def reset_predictor_cache() -> None:
+    """模型切换后清空预测器缓存，避免继续使用旧 artifact。"""
+    global _predictor_instance
+    global _predictor_model_version
+    _predictor_instance = None
+    _predictor_model_version = None
+
+
 def _to_builtin(value: Any) -> Any:
     """递归将 numpy、Path 等对象转换为可 JSON 序列化类型。"""
     if isinstance(value, dict):

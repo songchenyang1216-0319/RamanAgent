@@ -1,0 +1,19 @@
+{
+  "name": "web-search",
+  "display_name": "联网搜索",
+  "description": "搜索互联网最新信息，并把结果作为上下文提供给大模型回答。",
+  "version": "1.0.0",
+  "enabled": true,
+  "abilities": [
+    {
+      "name": "search",
+      "display_name": "搜索网页",
+      "description": "根据关键词搜索网页，返回标题、链接和摘要。"
+    },
+    {
+      "name": "answer_with_sources",
+      "display_name": "带来源回答",
+      "description": "基于搜索结果生成带来源的回答。"
+    }
+  ]
+}

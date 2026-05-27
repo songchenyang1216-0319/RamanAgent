@@ -9,7 +9,15 @@ from backend.agent.agent_service import RamanAgentService
 from backend.main import app
 
 
-def test_agent_service_and_router():
+def _mock_llm(monkeypatch):
+    monkeypatch.setattr(
+        "backend.services.llm_service.LLMService._chat_complete",
+        lambda self, system_prompt, user_prompt: (f"模拟回复：当前使用 {self.provider}/{self.model}。", {"mock": True}),
+    )
+
+
+def test_agent_service_and_router(monkeypatch):
+    _mock_llm(monkeypatch)
     service = RamanAgentService()
     tools = service.list_tools()
     tool_names = {tool["name"] for tool in tools}

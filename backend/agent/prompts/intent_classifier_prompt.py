@@ -11,6 +11,7 @@ ALLOWED_LLM_INTENTS = (
     "model_info",
     "system_info_query",
     "history_query",
+    "web_search",
     "file_analysis",
     "report_generation",
     "spectral_quality",
@@ -34,6 +35,7 @@ def build_intent_classifier_system_prompt() -> str:
         "其中：model_info 表示询问当前模型、模型文件、当前权重或系统正在使用的模型能力；"
         "system_info_query 表示询问系统状态、平台来源、Skills 状态、会话信息、模型列表或运行配置；"
         "history_query 表示查看历史记录、最近一次实验、过去结果；"
+        "web_search 表示需要联网搜索公开网页、新闻、最新事件或查找现实世界信息；"
         "file_analysis 表示想分析上传文件或样品；"
         "report_generation 表示要生成报告或导出总结；"
         "spectral_quality 表示评估谱图质量、噪声、基线或采集质量；"
