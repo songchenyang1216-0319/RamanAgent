@@ -124,9 +124,9 @@ def build_general_chat_local_reply(message: str, system_context: dict | None = N
         return _pick_variant(
             message,
             (
-                f"我是一个多功能 Agent。当前内置了系统查询、通用文件处理和 Raman 光谱处理等 Skill。普通问题我也能简洁回答；如果你愿意，我也可以继续帮你看模型或分析文件。{f'当前模型版本是 {current_model}。' if current_model else ''}",
-                f"我是这个工作台的通用 Agent。专业一点说，我可以按 Skill 分工处理文件、Raman 光谱、报告和系统状态；日常聊天也可以。{f'当前模型版本是 {current_model}。' if current_model else ''}",
-                f"我是多功能 Agent，不只是能回答 Raman 问题，也能做基础聊天、模型查看和通用文件分析。{f'当前系统记录的模型版本是 {current_model}。' if current_model else ''}",
+                f"我是一个多功能 Agent 工作台，可以普通聊天、处理文件、调用 Skill，也能通过 Raman 专业 Skill 做光谱分析。{f'当前 Raman 业务模型版本是 {current_model}。' if current_model else ''}",
+                f"我是通用 Agent 工作台里的助手。日常聊天、技术解释、文件处理、联网搜索和 Raman 光谱分析都可以接；Raman 只是其中一个专业 Skill。{f'当前 Raman 业务模型版本是 {current_model}。' if current_model else ''}",
+                f"你可以把我当成一个会聊天、会调用工具的 Agent 工作台。需要普通交流时直接问；需要文件或 Raman 分析时上传文件即可。{f'当前系统记录的 Raman 模型版本是 {current_model}。' if current_model else ''}",
             ),
         )
 
@@ -151,8 +151,8 @@ def build_general_chat_local_reply(message: str, system_context: dict | None = N
         )
 
     if current_model:
-        return f"我是这个工作台的多功能 Agent。当前系统记录的模型版本是 {current_model}。如果你要，我可以继续帮你聊基础问题，也可以直接看模型、历史记录、处理文件或分析 Raman CSV。"
-    return "我是这个工作台的多功能 Agent。除了 Raman 光谱处理，我也能做基础聊天、系统查询和通用文件分析。"
+        return f"我是一个多功能 Agent 工作台，当前系统记录的 Raman 业务模型版本是 {current_model}。你可以继续普通聊天，也可以让我查看系统状态、处理文件或分析 Raman CSV。"
+    return "我是一个多功能 Agent 工作台。除了普通聊天和系统查询，我也能处理文件；Raman 光谱分析是其中一个内置专业 Skill。"
 
 
 def build_general_chat_system_prompt(system_context: dict | None = None) -> str:

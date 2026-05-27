@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from backend.agent.tools.artifact_tool import check_artifacts_tool
 from backend.agent.tools.history_tool import get_history_detail_tool, list_history_tool
+from backend.agent.tools.web_search_tool import web_search_tool
 from backend.agent.tools.predict_tool import predict_methanol_tool
 from backend.agent.tools.report_tool import explain_result_tool, generate_report_tool
 from backend.agent.tools.spectral_tools.baseline_quality_tool import analyze_baseline_quality
@@ -52,6 +53,29 @@ TOOL_REGISTRY = {
         },
         "output_schema": {"success": "bool", "total": "int", "items": "list"},
         "handler": list_history_tool,
+    },
+    "web_search": {
+        "name": "web_search",
+        "description": "联网搜索公开网页信息，返回搜索结果摘要",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["query"],
+        },
+        "output_schema": {
+            "success": "bool",
+            "query": "str",
+            "total": "int",
+            "items": "list",
+            "used_provider": "str",
+            "answer": "str|null",
+            "error_code": "str|null",
+            "error_message": "str|null",
+        },
+        "handler": web_search_tool,
     },
     "get_history_detail": {
         "name": "get_history_detail",

@@ -1,0 +1,2 @@
+- 用户：给我讲一下 Agent 是什么
+- 助手：模拟回复：当前使用 sensenova/deepseek-v4-flash。

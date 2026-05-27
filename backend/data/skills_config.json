@@ -26,6 +26,13 @@
         "list_skills": true
       }
     },
+    "web-search": {
+      "enabled": true,
+      "actions": {
+        "search": true,
+        "answer_with_sources": true
+      }
+    },
     "text-document-processor": {
       "enabled": true,
       "actions": {

@@ -13,6 +13,7 @@ from raman_core.methanol.config import PROJECT_ROOT
 from .agent_system_skill import AgentSystemSkill
 from .base import BaseSkill, SkillResult
 from .raman_spectroscopy_skill import RamanSpectroscopySkill
+from .web_search.web_search_skill import WebSearchSkill
 from .upload_service import list_uploaded_skills
 from .uploaded_package_skill import UploadedPackageSkill, discover_uploaded_package_skills
 
@@ -383,3 +384,4 @@ def match_uploaded_skill(message: str, file_suffix: str | None = None) -> tuple[
 
 register_skill(RamanSpectroscopySkill())
 register_skill(AgentSystemSkill(skill_list_provider=_skill_list_provider))
+register_skill(WebSearchSkill())

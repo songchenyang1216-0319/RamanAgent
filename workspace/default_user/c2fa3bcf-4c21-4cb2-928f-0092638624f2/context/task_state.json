@@ -1,0 +1,23 @@
+{
+  "tasks": [
+    {
+      "task_id": "79f99ac005fe4bd9ae16c2ed1a3a742e",
+      "user_id": "default_user",
+      "conversation_id": "c2fa3bcf-4c21-4cb2-928f-0092638624f2",
+      "intent": "full_preprocess_pipeline",
+      "status": "success",
+      "input_message": "帮我预处理",
+      "input_files": [],
+      "output_files": [],
+      "selected_skill": "raman_spectroscopy_skill",
+      "selected_ability": "full_preprocess_pipeline",
+      "created_at": "2026-05-27T13:55:39",
+      "updated_at": "2026-05-27T13:55:39",
+      "error_message": null
+    }
+  ],
+  "current_task_id": "79f99ac005fe4bd9ae16c2ed1a3a742e",
+  "selected_provider": null,
+  "selected_model": null,
+  "updated_at": "2026-05-27T13:55:40"
+}

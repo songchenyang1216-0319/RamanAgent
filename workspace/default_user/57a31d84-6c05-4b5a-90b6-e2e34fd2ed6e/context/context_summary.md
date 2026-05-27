@@ -1,0 +1,2 @@
+- 用户：现在 GitHub 上比较火的 Agent 项目有哪些？
+- 助手：我帮你联网搜索到 5 条相关结果。 重点结果包括：GitHub 上 10 大热门开源 AI Agent 项目综述 - 知乎；GitHub 上 Star 数量前 18 的开源 AI Agent 项目 - NocoBase；收藏级干货：2026年Agent学习路线图：7个GitHub顶级开源项目全解析_agent开源项目-CSDN博客。

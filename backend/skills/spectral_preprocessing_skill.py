@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 
 from backend.services.methanol_service import get_predictor
 from backend.services.model_registry_service import ModelRegistryService
+from backend.utils.plot_style import apply_chinese_plot_style
 from raman_core.methanol.preprocess import (
     apply_sg_smoothing,
     baseline_als,
@@ -166,8 +167,7 @@ class SpectralPreprocessingSkill(BaseSkill):
         ensure_dirs()
         PLOT_DIR.mkdir(parents=True, exist_ok=True)
         plot_path = PLOT_DIR / f"{source_path.stem}_{action_name}_comparison.png"
-        plt.rcParams["font.sans-serif"] = ["Arial", "DejaVu Sans"]
-        plt.rcParams["axes.unicode_minus"] = False
+        apply_chinese_plot_style()
         fig, ax = plt.subplots(figsize=(8, 4))
         ax.plot(raw_axis, raw_values, label="Raw", alpha=0.72)
         ax.plot(processed_axis, processed_values, label="Processed", alpha=0.92)
@@ -192,8 +192,7 @@ class SpectralPreprocessingSkill(BaseSkill):
         ensure_dirs()
         PLOT_DIR.mkdir(parents=True, exist_ok=True)
         plot_path = PLOT_DIR / f"{source_path.stem}_{suffix}.png"
-        plt.rcParams["font.sans-serif"] = ["Arial", "DejaVu Sans"]
-        plt.rcParams["axes.unicode_minus"] = False
+        apply_chinese_plot_style()
         fig, ax = plt.subplots(figsize=(8, 4))
         ax.plot(axis, values, linewidth=1.2)
         ax.set_xlabel("Wavenumber")

@@ -20,6 +20,25 @@ logger = logging.getLogger(__name__)
 SKILL_UPLOAD_DIR = PROJECT_ROOT / "backend" / "data" / "skill_uploads"
 SKILL_EXTRACT_DIR = PROJECT_ROOT / "backend" / "skills" / "custom"
 SKILL_UPLOAD_META_PATH = PROJECT_ROOT / "backend" / "data" / "uploaded_skills.json"
+MAX_ZIP_BYTES = 20 * 1024 * 1024
+MAX_EXTRACTED_BYTES = 60 * 1024 * 1024
+MAX_SINGLE_FILE_BYTES = 10 * 1024 * 1024
+MAX_FILE_COUNT = 300
+DANGEROUS_EXTENSIONS = {
+    ".bat",
+    ".cmd",
+    ".com",
+    ".dll",
+    ".dylib",
+    ".exe",
+    ".js",
+    ".msi",
+    ".ps1",
+    ".pyd",
+    ".scr",
+    ".so",
+    ".vbs",
+}
 
 
 def _ensure_dirs() -> None:
@@ -96,6 +115,36 @@ def _resolve_record_path(value: str) -> Path:
     if path.is_absolute():
         return path
     return PROJECT_ROOT / path
+
+
+def _is_zip_symlink(member: zipfile.ZipInfo) -> bool:
+    mode = (member.external_attr >> 16) & 0o170000
+    return mode == 0o120000
+
+
+def _validate_zip_members(zf: zipfile.ZipFile) -> None:
+    total_size = 0
+    file_count = 0
+    for member in zf.infolist():
+        member_name = str(member.filename or "").replace("\\", "/")
+        member_path = Path(member_name)
+        if not member_name or member_path.is_absolute() or ".." in member_path.parts:
+            raise ValueError("zip 包含非法路径，已拒绝处理。")
+        if _is_zip_symlink(member):
+            raise ValueError("zip 包含软链接，已拒绝处理。")
+        if member.is_dir():
+            continue
+
+        file_count += 1
+        total_size += int(member.file_size or 0)
+        if file_count > MAX_FILE_COUNT:
+            raise ValueError(f"zip 文件数量超过限制（最多 {MAX_FILE_COUNT} 个）。")
+        if member.file_size > MAX_SINGLE_FILE_BYTES:
+            raise ValueError(f"zip 中单个文件超过限制（最多 {MAX_SINGLE_FILE_BYTES // 1024 // 1024}MB）。")
+        if total_size > MAX_EXTRACTED_BYTES:
+            raise ValueError(f"zip 解压后总大小超过限制（最多 {MAX_EXTRACTED_BYTES // 1024 // 1024}MB）。")
+        if Path(member_name).suffix.lower() in DANGEROUS_EXTENSIONS:
+            raise ValueError(f"zip 包含不允许的文件类型：{Path(member_name).suffix.lower()}")
 
 
 def _resolve_discovered_metadata_from_extract_dir(extract_dir_value: str) -> dict[str, Any]:
@@ -184,6 +233,8 @@ def save_uploaded_skill(filename: str, content: bytes) -> dict[str, Any]:
     _ensure_dirs()
     if not filename.lower().endswith(".zip"):
         raise ValueError("仅支持上传 .zip 格式的 Skill 压缩包。")
+    if len(content or b"") > MAX_ZIP_BYTES:
+        raise ValueError(f"Skill zip 文件超过限制（最多 {MAX_ZIP_BYTES // 1024 // 1024}MB）。")
 
     safe_name = _safe_skill_name(filename)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -200,12 +251,14 @@ def save_uploaded_skill(filename: str, content: bytes) -> dict[str, Any]:
         shutil.rmtree(extract_dir)
     extract_dir.mkdir(parents=True, exist_ok=True)
 
-    with zipfile.ZipFile(archive_path, "r") as zf:
-        for member in zf.infolist():
-            member_path = Path(member.filename)
-            if member_path.is_absolute() or ".." in member_path.parts:
-                raise ValueError("zip 包含非法路径，已拒绝处理。")
-        zf.extractall(extract_dir)
+    try:
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            _validate_zip_members(zf)
+            zf.extractall(extract_dir)
+    except Exception:
+        archive_path.unlink(missing_ok=True)
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        raise
 
     discovered = discover_uploaded_package_skills(extract_dir)
     runtime_skill = discovered[0] if discovered else None
@@ -226,6 +279,14 @@ def save_uploaded_skill(filename: str, content: bytes) -> dict[str, Any]:
         archive_path.unlink(missing_ok=True)
         shutil.rmtree(extract_dir, ignore_errors=True)
         raise ValueError("上传的 Skill 包缺少 SKILL.md 或 manifest.json，无法识别。")
+    if runtime_skill_mode == "executable" and not has_skill_md:
+        archive_path.unlink(missing_ok=True)
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        raise ValueError("可执行型 Skill 必须包含 SKILL.md。")
+    if runtime_skill_mode == "executable" and (not has_manifest or not has_scripts):
+        archive_path.unlink(missing_ok=True)
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        raise ValueError("可执行型 Skill 必须包含 manifest.json 和 scripts/。")
     runtime_name = runtime_skill.name if runtime_skill is not None else safe_name
     runtime_display_name = runtime_skill.display_name if runtime_skill is not None else safe_name
     runtime_version = runtime_skill.version if runtime_skill is not None else "uploaded"
@@ -248,9 +309,9 @@ def save_uploaded_skill(filename: str, content: bytes) -> dict[str, Any]:
         "uploaded_at": datetime.now().isoformat(timespec="seconds"),
         "archive_path": _record_path_value(archive_path),
         "extract_dir": _record_path_value(extract_dir),
-        "reload_required": True,
+        "reload_required": False,
         "unavailable_reason": unavailable_reason,
-        "usage": "上传成功后会在 Skills 列表中显示为 source: uploaded / 待加载。",
+        "usage": "上传成功后会在 Skills 列表中显示为 source: uploaded。",
         "source": "uploaded",
     }
     records = _replace_record(_read_upload_meta(), record)
@@ -259,8 +320,10 @@ def save_uploaded_skill(filename: str, content: bytes) -> dict[str, Any]:
         "success": True,
         "skill_name": runtime_name,
         "skill_mode": runtime_skill_mode,
+        "skill_type": "prompt" if runtime_skill_mode == "prompt_only" else "executable",
+        "registered": True,
         "message": "提示词型 Skill 已安装，可用于增强大模型回答。" if runtime_skill_mode == "prompt_only" else "可执行型 Skill 已安装，可用于脚本执行。",
-        "reload_required": True,
+        "reload_required": False,
         "archive_path": record["archive_path"],
         "extract_dir": record["extract_dir"],
     }

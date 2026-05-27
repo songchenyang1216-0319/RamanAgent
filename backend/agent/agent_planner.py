@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 SUPPORTED_PLAN_TOOLS = {
     "get_current_model",
     "list_history",
+    "web_search",
     "predict_methanol",
     "professional_analysis",
     "spectral_quality",
@@ -68,6 +69,32 @@ class AgentPlanner:
 
         wants_model = self._contains_any(text, ("当前用的模型", "当前模型", "用的模型", "哪个模型", "模型版本", "模型信息"))
         wants_history = self._contains_any(text, ("历史记录", "历史样品", "最近记录", "历史结果", "之前的样品", "之前样品", "历史"))
+        wants_web_search = (
+            self._contains_any(
+                text,
+                (
+                    "搜索一下",
+                    "搜索",
+                    "查一下",
+                    "查一查",
+                    "找一下",
+                    "网上搜索",
+                    "网上查",
+                    "联网搜索",
+                    "联网查一下",
+                    "联网查",
+                    "最新",
+                    "新闻",
+                    "近况",
+                    "最近消息",
+                    "多少次",
+                    "一共来过",
+                    "相关内容",
+                    "价格",
+                ),
+            )
+            or ("github" in lowered and self._contains_any(text, ("现在", "最新", "比较火", "热门", "项目")))
+        )
         wants_prediction = (
             self._contains_any(text, ("分析这个样品", "分析这个 csv", "分析这个CSV", "分析样品", "预测浓度", "预测甲醇", "预测"))
             or ("分析" in text and ("样品" in text or "csv" in lowered))
@@ -96,6 +123,8 @@ class AgentPlanner:
             self._add_step(steps, "get_current_model", "用户要求查看当前模型信息")
         if wants_history and not wants_compare:
             self._add_step(steps, "list_history", "用户要求查看历史记录")
+        if wants_web_search:
+            self._add_step(steps, "web_search", "用户要求联网搜索公开信息")
         if wants_prediction:
             self._add_step(steps, "predict_methanol", "用户要求分析样品或预测浓度")
         if wants_quality:

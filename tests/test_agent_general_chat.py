@@ -9,7 +9,15 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.agent.agent_service import RamanAgentService
 
 
-def test_builtin_and_tool_intents():
+def _mock_llm(monkeypatch):
+    monkeypatch.setattr(
+        "backend.services.llm_service.LLMService._chat_complete",
+        lambda self, system_prompt, user_prompt: (f"模拟回复：当前使用 {self.provider}/{self.model}。", {"mock": True}),
+    )
+
+
+def test_builtin_and_tool_intents(monkeypatch):
+    _mock_llm(monkeypatch)
     service = RamanAgentService()
 
     identity = service.chat("你是谁")
@@ -40,7 +48,8 @@ def test_builtin_and_tool_intents():
     assert history["category"] == "tool"
 
 
-def test_general_chat_and_fallback():
+def test_general_chat_and_fallback(monkeypatch):
+    _mock_llm(monkeypatch)
     service = RamanAgentService()
 
     greeting = service.chat("你好")
@@ -51,7 +60,7 @@ def test_general_chat_and_fallback():
     thanks = service.chat("谢谢")
     assert thanks["category"] == "general_chat"
     assert thanks["intent"] == "gratitude"
-    assert "不客气" in thanks["reply"] or "随时" in thanks["reply"]
+    assert thanks["reply"]
 
     knowledge = service.chat("拉曼光谱和红外光谱有什么区别")
     assert knowledge["category"] == "general_chat"
@@ -73,7 +82,60 @@ def test_general_chat_and_fallback():
     assert joke["reply"]
 
 
-def test_general_chat_debug_and_no_large_fields_by_default():
+def test_general_chat_opinion_does_not_trigger_raman(monkeypatch):
+    _mock_llm(monkeypatch)
+    service = RamanAgentService()
+
+    response = service.chat("你对普京访华的事情有什么看法？")
+    assert response["success"] is True
+    assert response["intent"] == "general_chat"
+    assert response["category"] == "general_chat"
+    assert response.get("skill_name") is None
+
+
+def test_web_search_intent(monkeypatch):
+    _mock_llm(monkeypatch)
+    service = RamanAgentService()
+    monkeypatch.setattr(
+        service,
+        "run_tool",
+        lambda tool_name, params=None: {
+            "success": True,
+            "query": (params or {}).get("query"),
+            "total": 1,
+            "items": [{"title": "Agent 项目", "url": "https://example.com", "snippet": "示例结果"}],
+            "source": "mock",
+            "used_provider": "tavily",
+            "answer": "示例搜索答案",
+        }
+        if tool_name == "web_search"
+        else {"success": True, "data": {"model_version": "methanol_v1"}},
+    )
+    monkeypatch.setattr(
+        "backend.services.llm_service.LLMService.generate_skill_augmented_reply",
+        lambda self, skill_context, user_message, conversation_context=None: {
+            "success": True,
+            "reply": "整理后的联网搜索回答",
+            "error_message": None,
+            "raw_response": {"mock": True},
+            "model_info": self.get_current_model_info(),
+        },
+    )
+
+    response = service.chat("现在 GitHub 上比较火的 Agent 项目有哪些？")
+    assert response["success"] is True
+    assert response["intent"] == "web_search"
+    assert response["category"] == "tool"
+    assert response["tool_used"] == "web_search"
+    assert response["skill_name"] == "web-search"
+    assert response["action_name"] == "search"
+    assert response["used_skill"] is True
+    assert response["data"]["used_provider"] == "tavily"
+    assert response["data"]["items"]
+
+
+def test_general_chat_debug_and_no_large_fields_by_default(monkeypatch):
+    _mock_llm(monkeypatch)
     service = RamanAgentService()
 
     normal = service.chat("你好")

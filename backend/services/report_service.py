@@ -115,16 +115,23 @@ def _build_sample_section(result: dict, model_info: dict, created_at: str) -> tu
 
 def _build_prediction_section(result: dict, professional_analysis: dict, model_info: dict) -> str:
     confidence = result.get("confidence", {}) or {}
+    disagreement = result.get("model_disagreement", {}) or {}
     ood_risk = professional_analysis.get("ood_risk", {}) or (professional_analysis.get("professional_summary", {}) or {}).get("ood_risk", {})
     train_warning = "是" if (ood_risk.get("level") in {"medium", "high"} and any("训练" in warning for warning in (ood_risk.get("warnings") or []))) else "否"
     unit = result.get("unit", "") or ""
     fusion_mode = ", ".join(model_info.get("algorithm", []) or ["SVR", "RF"])
+    target_name = result.get("target_name") or result.get("prediction_target") or "甲醇浓度"
     return "\n".join(
         [
             "## 2. 预测结果",
+            f"- 预测目标：{target_name}",
+            f"- SVR 预测结果：{_format_number(result.get('svr_prediction'))} {unit}".rstrip(),
+            f"- RF 预测结果：{_format_number(result.get('rf_prediction'))} {unit}".rstrip(),
+            f"- 融合预测结果：{_format_number(_resolve_prediction(result))} {unit}".rstrip(),
             f"- 预测浓度：{_format_number(_resolve_prediction(result))} {unit}".rstrip(),
             f"- 置信度：{confidence.get('status') or '未提供'}",
             f"- 是否超出训练范围：{train_warning}",
+            f"- 模型一致性说明：{disagreement.get('message') or '未提供'}",
             f"- 模型融合方式：{fusion_mode} 加权融合",
             "",
         ]
@@ -231,7 +238,7 @@ def _build_conclusion_section(result: dict, professional_analysis: dict, llm_exp
     unit = result.get("unit", "") or ""
     conclusion = summary.get("conclusion") or f"当前样品的融合预测浓度约为 {prediction} {unit}。"
     lines = [
-        "## 7. 结论与建议",
+        "## 7. 简要结论与建议",
         f"- 一句话结论：{conclusion}",
         f"- 风险提醒：{'；'.join(str(item) for item in risks[:4]) if risks else '当前未发现明显风险。'}",
         f"- 下一步实验建议：{'；'.join(str(item) for item in suggestions[:4]) if suggestions else '建议做重复采集并结合实验条件复核。'}",

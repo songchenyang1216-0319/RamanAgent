@@ -12,6 +12,13 @@ from backend.agent.session_store import clear_sessions, get_last_analysis, get_s
 from backend.main import app
 
 
+def _mock_llm(monkeypatch):
+    monkeypatch.setattr(
+        "backend.services.llm_service.LLMService._chat_complete",
+        lambda self, system_prompt, user_prompt: (f"模拟回复：当前使用 {self.provider}/{self.model}。", {"mock": True}),
+    )
+
+
 def _mock_valid_agent_run_tool(tool_name, params=None):
     standardized_result = {
         "sample_file": "甲醇-1.3967-1.csv",
@@ -80,7 +87,8 @@ def _mock_valid_agent_run_tool(tool_name, params=None):
     raise AssertionError(f"未知工具: {tool_name}")
 
 
-def test_chat_without_session_id_returns_new_session_id():
+def test_chat_without_session_id_returns_new_session_id(monkeypatch):
+    _mock_llm(monkeypatch)
     clear_sessions()
     client = TestClient(app)
 
@@ -90,6 +98,7 @@ def test_chat_without_session_id_returns_new_session_id():
     assert response.status_code == 200
     assert payload["success"] is True
     assert payload["session_id"]
+    assert payload["conversation_id"] == payload["session_id"]
 
     session = get_session(payload["session_id"])
     assert session is not None
@@ -98,7 +107,22 @@ def test_chat_without_session_id_returns_new_session_id():
     assert session["messages"][1]["role"] == "assistant"
 
 
-def test_analyze_file_writes_last_analysis_to_session():
+def test_chat_accepts_conversation_id(monkeypatch):
+    _mock_llm(monkeypatch)
+    clear_sessions()
+    client = TestClient(app)
+
+    response = client.post("/api/agent/chat", json={"message": "你好", "conversation_id": "conv-smoke"})
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["success"] is True
+    assert payload["conversation_id"] == "conv-smoke"
+    assert payload["session_id"] == "conv-smoke"
+
+
+def test_analyze_file_writes_last_analysis_to_session(monkeypatch):
+    _mock_llm(monkeypatch)
     clear_sessions()
     client = TestClient(app)
     session_id = client.post("/api/agent/chat", json={"message": "你好"}).json()["session_id"]
@@ -125,7 +149,8 @@ def test_analyze_file_writes_last_analysis_to_session():
     assert last_analysis["report"]["report_file"] == "mock_report.md"
 
 
-def test_chat_can_answer_from_last_analysis_context():
+def test_chat_can_answer_from_last_analysis_context(monkeypatch):
+    _mock_llm(monkeypatch)
     clear_sessions()
     client = TestClient(app)
     session_id = client.post("/api/agent/chat", json={"message": "你好"}).json()["session_id"]
@@ -150,7 +175,8 @@ def test_chat_can_answer_from_last_analysis_context():
     assert "比较可靠" in payload["reply"]
 
 
-def test_chat_without_last_analysis_prompts_upload_first():
+def test_chat_without_last_analysis_prompts_upload_first(monkeypatch):
+    _mock_llm(monkeypatch)
     clear_sessions()
     client = TestClient(app)
 
