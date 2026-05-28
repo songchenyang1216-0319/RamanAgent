@@ -283,10 +283,10 @@ def save_uploaded_skill(filename: str, content: bytes) -> dict[str, Any]:
         archive_path.unlink(missing_ok=True)
         shutil.rmtree(extract_dir, ignore_errors=True)
         raise ValueError("可执行型 Skill 必须包含 SKILL.md。")
-    if runtime_skill_mode == "executable" and (not has_manifest or not has_scripts):
+    if runtime_skill_mode == "executable" and not (has_manifest or has_scripts):
         archive_path.unlink(missing_ok=True)
         shutil.rmtree(extract_dir, ignore_errors=True)
-        raise ValueError("可执行型 Skill 必须包含 manifest.json 和 scripts/。")
+        raise ValueError("可执行型 Skill 至少需要包含 manifest.json 或 scripts/。")
     runtime_name = runtime_skill.name if runtime_skill is not None else safe_name
     runtime_display_name = runtime_skill.display_name if runtime_skill is not None else safe_name
     runtime_version = runtime_skill.version if runtime_skill is not None else "uploaded"

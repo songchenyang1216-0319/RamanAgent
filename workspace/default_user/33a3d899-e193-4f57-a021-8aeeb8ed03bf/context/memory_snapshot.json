@@ -2,13 +2,14 @@
   "user_id": "default_user",
   "preferred_model": null,
   "recent_skills": [
-    "data-analysis-skill",
-    "image-router-skill",
-    "raman_spectroscopy_skill",
+    "agent-skill-upload-test",
     "text-document-processor",
+    "image-router-skill",
+    "data-analysis-skill",
+    "raman_spectroscopy_skill",
     "agent_system_skill"
   ],
   "profile": {},
-  "updated_at": "2026-05-27T17:47:38",
+  "updated_at": "2026-05-28T13:40:42",
   "preferred_provider": null
 }

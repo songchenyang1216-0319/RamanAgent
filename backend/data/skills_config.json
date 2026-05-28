@@ -30,12 +30,21 @@
     "data-analysis-skill": {
       "enabled": true,
       "actions": {
-        "inspect_table": true,
-        "summarize_table": true,
+        "count_records": true,
+        "groupby_count": true,
+        "groupby_statistics": true,
+        "query_table": true,
+        "sort_table": true,
+        "top_n": true,
         "missing_value_check": true,
         "basic_statistics": true,
-        "categorical_summary": true,
+        "visualize_table": true,
+        "clean_table": true,
+        "summarize_table": true,
+        "clarify": true,
+        "inspect_table": true,
         "chart_suggestion": true,
+        "categorical_summary": true,
         "simple_query_table": true,
         "export_clean_preview": true
       }

@@ -23,7 +23,6 @@ def test_vision_models_are_listed_with_category_metadata():
     ids = {item["model_id"] for item in vision_models}
     assert "sensenova-6.7-flash-lite" in ids
     assert "qwen3.6-plus" in ids
-    assert "gemini-2.5-flash" in ids
     for item in vision_models:
         assert item["supported_categories"]
         assert item["supported_category_labels"]

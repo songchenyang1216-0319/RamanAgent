@@ -791,10 +791,170 @@
       "created_at": "2026-05-27T17:47:37",
       "updated_at": "2026-05-27T17:47:38",
       "error_message": null
+    },
+    {
+      "task_id": "d1e890f41e594424a171edba3e117aa0",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "table_file_analysis",
+      "status": "success",
+      "input_message": "这个主要记录的是什么东西？",
+      "input_files": [
+        {
+          "file_id": "test_data_medium_no_raman_84db5f9c",
+          "filename": "test_data_medium_no_raman_84db5f9c.csv",
+          "original_name": "test_data_medium_no_raman.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_84db5f9c.csv",
+          "workspace_relative_path": "uploads\\test_data_medium_no_raman_84db5f9c.csv",
+          "mime_type": "application/vnd.ms-excel",
+          "size": 429315,
+          "kind": "upload",
+          "updated_at": "2026-05-28T10:30:04"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "test_data_medium_no_raman_84db5f9c.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_84db5f9c.csv"
+        }
+      ],
+      "selected_skill": "data-analysis-skill",
+      "selected_ability": "simple_query_table",
+      "created_at": "2026-05-28T10:30:04",
+      "updated_at": "2026-05-28T10:30:17",
+      "error_message": null
+    },
+    {
+      "task_id": "2f2314082c6243aaafe4cdaa0e2d9d51",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "table_file_analysis",
+      "status": "success",
+      "input_message": "分析一下，这里province是上海的有多少条记录？",
+      "input_files": [
+        {
+          "file_id": "test_data_medium_no_raman_afa1430e",
+          "filename": "test_data_medium_no_raman_afa1430e.csv",
+          "original_name": "test_data_medium_no_raman.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_afa1430e.csv",
+          "workspace_relative_path": "uploads\\test_data_medium_no_raman_afa1430e.csv",
+          "mime_type": "application/vnd.ms-excel",
+          "size": 429315,
+          "kind": "upload",
+          "updated_at": "2026-05-28T10:32:10"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "test_data_medium_no_raman_afa1430e.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_afa1430e.csv"
+        }
+      ],
+      "selected_skill": "data-analysis-skill",
+      "selected_ability": "summarize_table",
+      "created_at": "2026-05-28T10:32:10",
+      "updated_at": "2026-05-28T10:32:11",
+      "error_message": null
+    },
+    {
+      "task_id": "ff6fae0ef39247ffa2f620b08a679487",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "table_file_analysis",
+      "status": "success",
+      "input_message": "省份是上海的，有多少条记录",
+      "input_files": [
+        {
+          "file_id": "test_data_medium_no_raman_61ba46eb",
+          "filename": "test_data_medium_no_raman_61ba46eb.csv",
+          "original_name": "test_data_medium_no_raman.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_61ba46eb.csv",
+          "workspace_relative_path": "uploads\\test_data_medium_no_raman_61ba46eb.csv",
+          "mime_type": "application/vnd.ms-excel",
+          "size": 429315,
+          "kind": "upload",
+          "updated_at": "2026-05-28T13:09:20"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "test_data_medium_no_raman_61ba46eb.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_61ba46eb.csv"
+        }
+      ],
+      "selected_skill": "data-analysis-skill",
+      "selected_ability": "count_records",
+      "created_at": "2026-05-28T13:09:20",
+      "updated_at": "2026-05-28T13:09:32",
+      "error_message": null
+    },
+    {
+      "task_id": "918971c9fc314dad805dab28f6b1f573",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "table_file_analysis",
+      "status": "success",
+      "input_message": "这个文件中，省份是上海，有多少条记录？",
+      "input_files": [
+        {
+          "file_id": "test_data_medium_no_raman_f9d5020b",
+          "filename": "test_data_medium_no_raman_f9d5020b.csv",
+          "original_name": "test_data_medium_no_raman.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_f9d5020b.csv",
+          "workspace_relative_path": "uploads\\test_data_medium_no_raman_f9d5020b.csv",
+          "mime_type": "application/vnd.ms-excel",
+          "size": 429315,
+          "kind": "upload",
+          "updated_at": "2026-05-28T13:10:21"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "test_data_medium_no_raman_f9d5020b.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_f9d5020b.csv"
+        }
+      ],
+      "selected_skill": "data-analysis-skill",
+      "selected_ability": "count_records",
+      "created_at": "2026-05-28T13:10:21",
+      "updated_at": "2026-05-28T13:10:23",
+      "error_message": null
+    },
+    {
+      "task_id": "371ec862301444ee8648aaeab5927aeb",
+      "user_id": "default_user",
+      "conversation_id": "33a3d899-e193-4f57-a021-8aeeb8ed03bf",
+      "intent": "table_file_analysis",
+      "status": "success",
+      "input_message": "吧这个文件中所有省份是北京的记录都列出来",
+      "input_files": [
+        {
+          "file_id": "test_data_medium_no_raman_92232262",
+          "filename": "test_data_medium_no_raman_92232262.csv",
+          "original_name": "test_data_medium_no_raman.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_92232262.csv",
+          "workspace_relative_path": "uploads\\test_data_medium_no_raman_92232262.csv",
+          "mime_type": "application/vnd.ms-excel",
+          "size": 429315,
+          "kind": "upload",
+          "updated_at": "2026-05-28T13:11:14"
+        }
+      ],
+      "output_files": [
+        {
+          "filename": "test_data_medium_no_raman_92232262.csv",
+          "path": "workspace\\default_user\\33a3d899-e193-4f57-a021-8aeeb8ed03bf\\uploads\\test_data_medium_no_raman_92232262.csv"
+        }
+      ],
+      "selected_skill": "data-analysis-skill",
+      "selected_ability": "clarify",
+      "created_at": "2026-05-28T13:11:14",
+      "updated_at": "2026-05-28T13:11:15",
+      "error_message": null
     }
   ],
-  "current_task_id": "8aa693896f384e788e925ca8ab1d3fb0",
-  "updated_at": "2026-05-27T17:47:38",
+  "current_task_id": "371ec862301444ee8648aaeab5927aeb",
+  "updated_at": "2026-05-28T13:11:15",
   "selected_provider": "sensenova",
   "selected_model": "deepseek-v4-flash"
 }

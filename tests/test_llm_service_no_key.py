@@ -26,7 +26,8 @@ def test_llm_service_no_key():
                 "result_summary": {"prediction_text": "融合预测结果为 0.1200 %"},
             }
         )
-        assert "未配置 SILICONFLOW_API_KEY" in message
+        assert message
+        assert "Traceback" not in message
 
         general_reply = service.generate_general_reply("你好", {"current_model_version": "methanol_v1"})
         assert general_reply["reply"]

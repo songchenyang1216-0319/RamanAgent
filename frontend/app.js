@@ -1720,7 +1720,21 @@ function renderGenericAnalysisResult(message) {
 }
 
 function renderAssistantResponse(payload) {
-  const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+  const messages = Array.isArray(payload?.messages) && payload.messages.length
+    ? payload.messages
+    : [
+        {
+          role: "assistant",
+          type: payload?.success === false ? "error" : "text",
+          content: payload?.success === false
+            ? (payload?.error_message || payload?.reply || "处理失败。")
+            : (payload?.reply || payload?.message || ""),
+          skill_name: payload?.skill_name,
+          action_name: payload?.action_name,
+          result_kind: "generic",
+          skill_mode: payload?.skill_mode,
+        },
+      ];
   messages.forEach((message) => {
     const modelBadge = buildAssistantModelBadge(message, payload);
     if (message.type === "analysis") {
@@ -2333,7 +2347,8 @@ async function sendChatMessage(presetMessage = "") {
       persistSessionId(state.sessionId);
     }
 
-    if (!response.success) {
+    const treatAsSuccess = response.success === true || (response.reply && !response.error_message);
+    if (!treatAsSuccess) {
       console.error("发送消息失败：", response);
       const friendlyMessage = escapeHtml(formatResponseError(response));
       appendMessage("assistant", `<p class="error-message">${friendlyMessage}</p>`, "error");

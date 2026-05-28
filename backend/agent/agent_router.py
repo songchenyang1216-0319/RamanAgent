@@ -11,6 +11,7 @@ from uuid import uuid4
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
+from backend.agent.orchestrator import AgentOrchestrator
 from backend.agent.agent_service import RamanAgentService
 from backend.agent.tools.report_tool import explain_result_tool, generate_report_tool
 from backend.agent.tools.spectral_tools.spectral_summary_tool import analyze_spectrum_professionally
@@ -39,7 +40,9 @@ from backend.skills.data_analysis_skill import (
     detect_raman_table_signal,
     infer_data_analysis_action,
     is_supported_table_suffix,
+    load_table_file,
 )
+from backend.skills.table_query_planner import TableQueryPlanner
 from backend.skills.upload_service import delete_uploaded_skill, list_uploaded_skills, save_uploaded_skill
 from backend.services.history_service import save_analysis_history
 from backend.api.methanol_api import build_figure_web_urls, build_report_web_urls
@@ -54,6 +57,7 @@ from raman_core.methanol.config import OUTPUT_DIR, PROJECT_ROOT, ensure_dirs
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 service = RamanAgentService()
+orchestrator = AgentOrchestrator()
 model_registry_service = ModelRegistryService()
 workspace_manager = WorkspaceManager()
 user_memory_manager = UserMemoryManager()
@@ -65,6 +69,7 @@ TABLE_FILE_SUFFIXES = {".csv", ".xlsx", ".xls"}
 DATA_ANALYSIS_MISSING_MESSAGE = "当前识别为普通表格数据，但 data-analysis-skill 未启用。你可以在 Skill 管理中启用表格数据分析 Skill。"
 IMAGE_ROUTER_MISSING_MESSAGE = "当前已识别为图片文件，但还没有安装图片处理 Skill。你可以上传 image-router-skill，或后续启用视觉模型能力。"
 RAMAN_SKILL_DISABLED_MESSAGE = "当前识别为 Raman / 光谱数据请求，但 Raman 光谱分析 Skill 未启用。"
+table_query_planner = TableQueryPlanner()
 
 
 def _llm_model_info(
@@ -922,10 +927,32 @@ def _infer_table_skill_route(message: str, file_path: str | Path | None = None, 
     if _looks_like_raman_file_task(message):
         return "raman_spectroscopy_skill", "predict_methanol_concentration", {"route": "table_raman_route", "reason": "raman_message_keywords"}
 
-    if _looks_like_data_analysis_task(message):
-        if get_skill("data-analysis-skill") is not None:
-            return "data-analysis-skill", infer_data_analysis_action(message, default_action="summarize_table"), {"route": "table_data_analysis_route", "reason": "data_analysis_message_keywords"}
+    if get_skill("data-analysis-skill") is None:
         return None, None, {"route": "data_analysis_missing_skill", "reason": "data_analysis_skill_not_enabled"}
+
+    def _build_table_plan_route(reason: str) -> tuple[str | None, str | None, dict | None]:
+        if not file_path:
+            action_name = infer_data_analysis_action(message, default_action="summarize_table")
+            return "data-analysis-skill", action_name, {"route": "table_data_analysis_route", "reason": reason}
+        try:
+            load_result = load_table_file(file_path, preview_only=False)
+            plan = table_query_planner.plan(message, load_result.df)
+            return "data-analysis-skill", plan.action, {
+                "route": "table_data_analysis_route",
+                "reason": reason,
+                "table_query_plan": plan.to_dict(),
+                "planner_confidence": plan.confidence,
+                "planner_reason": plan.reason,
+            }
+        except Exception as exc:
+            action_name = infer_data_analysis_action(message, default_action="summarize_table")
+            return "data-analysis-skill", action_name, {
+                "route": "table_data_analysis_route",
+                "reason": f"{reason}:planner_fallback:{type(exc).__name__}",
+            }
+
+    if _looks_like_data_analysis_task(message):
+        return _build_table_plan_route("data_analysis_message_keywords")
 
     table_signal = detect_raman_table_signal(file_path) if file_path else {"is_raman": False, "reason": "no_file_path", "matched_hints": []}
     if table_signal.get("is_raman"):
@@ -934,12 +961,13 @@ def _infer_table_skill_route(message: str, file_path: str | Path | None = None, 
             "reason": f"raman_table_signal:{table_signal.get('reason')}",
         }
 
-    if get_skill("data-analysis-skill") is not None:
-        return "data-analysis-skill", infer_data_analysis_action(message, default_action="summarize_table"), {
-            "route": "table_data_analysis_route",
-            "reason": f"default_table_analysis:{table_signal.get('reason')}",
+    if suffix == ".csv" and normalized in {"请分析这个文件", "帮我分析这个文件", "分析这个文件", "请分析一下这个文件", "请分析该文件"}:
+        return "raman_spectroscopy_skill", "predict_methanol_concentration", {
+            "route": "table_raman_route",
+            "reason": "generic_csv_analysis_default",
         }
-    return None, None, {"route": "data_analysis_missing_skill", "reason": "data_analysis_skill_not_enabled"}
+
+    return _build_table_plan_route(f"default_table_analysis:{table_signal.get('reason')}")
 
 
 def _select_skill_route(
@@ -1171,6 +1199,72 @@ def _analyze_uploaded_file_with_skills(
             debug=debug,
         )
 
+    table_query_plan = (route_info or {}).get("table_query_plan")
+    if target_skill_name == "data-analysis-skill" and target_action_name == "clarify":
+        clarification_question = str((table_query_plan or {}).get("clarification_question") or "我需要先确认你的表格分析目标。")
+        response_payload = {
+            "success": True,
+            "session_id": session_id,
+            "message": message,
+            "saved_file": str(save_path.relative_to(PROJECT_ROOT)),
+            "reply": clarification_question,
+            "llm_explanation": clarification_question,
+            "llm_error": None,
+            "skill_name": target_skill_name,
+            "action_name": target_action_name,
+            "result": {
+                "need_clarification": True,
+                "clarification_question": clarification_question,
+                "debug": {
+                    "planner_confidence": (table_query_plan or {}).get("confidence"),
+                    "planner_reason": (table_query_plan or {}).get("reason"),
+                    "route": "table_analysis",
+                },
+            },
+            "data": {
+                "need_clarification": True,
+                "clarification_question": clarification_question,
+                "tool_info": {
+                    "source": "skill_execution",
+                    "skill": target_skill_name,
+                    "action": target_action_name,
+                    "filename": save_path.name,
+                    "rows": "",
+                    "columns": "",
+                    "sheet_name": "",
+                    "success": True,
+                    "error": "",
+                    "mode": "data_analysis",
+                },
+            },
+            "warnings": [],
+            "route_info": route_info,
+            "tool_info": {
+                "source": "skill_execution",
+                "skill": target_skill_name,
+                "action": target_action_name,
+                "filename": save_path.name,
+                "rows": "",
+                "columns": "",
+                "sheet_name": "",
+                "success": True,
+                "error": "",
+                "mode": "data_analysis",
+            },
+        }
+        response_payload.update(
+            _build_chat_messages_payload(
+                session_id=session_id,
+                role_type="text",
+                content=clarification_question,
+                analysis=None,
+                skill_name=target_skill_name,
+                action_name=target_action_name,
+                result_kind="generic",
+            )
+        )
+        return _attach_source(response_payload, "skill_execution", route_info=route_info, debug=debug)
+
     loader_result = None
     if target_skill_name == "raman_spectroscopy_skill":
         loader_skill = get_skill("raman_spectroscopy_skill")
@@ -1209,6 +1303,7 @@ def _analyze_uploaded_file_with_skills(
         action_name=target_action_name,
         file_path=str(save_path),
         metadata=metadata,
+        table_query_plan=table_query_plan,
         include_intermediate=debug,
         session_id=session_id,
         message=message,
@@ -1655,6 +1750,68 @@ async def chat(request: Request) -> dict:
         },
     )
     append_message(resolved_session_id, "user", effective_message)
+
+    orchestrator_payload: dict[str, object] = {
+        "message": effective_message,
+        "conversation_id": resolved_session_id,
+        "session_id": resolved_session_id,
+        "user_id": resolved_user_id,
+        "provider_id": provider_id,
+        "model_id": model_id,
+        "debug": debug,
+        "metadata": metadata,
+    }
+    if uploaded_file is not None and getattr(uploaded_file, "filename", ""):
+        save_path = await _save_uploaded_attachment(uploaded_file, user_id=resolved_user_id, conversation_id=resolved_session_id)
+        orchestrator_payload["file_path"] = str(save_path)
+        orchestrator_payload["file_name"] = save_path.name
+    else:
+        referenced_active_file = _resolve_referenced_active_file(resolved_user_id, resolved_session_id, effective_message)
+        if referenced_active_file is not None:
+            save_path, _ = referenced_active_file
+            orchestrator_payload["file_path"] = str(save_path)
+            orchestrator_payload["file_name"] = save_path.name
+        else:
+            session = get_session(resolved_session_id) or {}
+            last_file = str(session.get("last_file") or "").strip()
+            if last_file:
+                candidate = Path(last_file)
+                if not candidate.is_absolute():
+                    candidate = PROJECT_ROOT / candidate
+                try:
+                    resolved_candidate = candidate.resolve()
+                except Exception:
+                    resolved_candidate = candidate
+                if resolved_candidate.exists() and resolved_candidate.is_file():
+                    orchestrator_payload["file_path"] = str(resolved_candidate)
+                    orchestrator_payload["file_name"] = resolved_candidate.name
+
+    response_payload = orchestrator.handle_chat(orchestrator_payload)
+    assistant_reply = (
+        response_payload.get("reply")
+        or response_payload.get("llm_explanation")
+        or response_payload.get("error_message")
+        or "处理完成。"
+    )
+    append_message(resolved_session_id, "assistant", assistant_reply)
+    finalized = _finalize_workspace_response(
+        response_payload,
+        user_id=resolved_user_id,
+        conversation_id=resolved_session_id,
+        user_message=effective_message,
+        assistant_reply=assistant_reply,
+    )
+    _apply_task_state_from_response(resolved_session_id, finalized)
+    session_patch = {"last_analysis": _build_session_analysis_payload(finalized, resolved_session_id)}
+    file_path_value = str(orchestrator_payload.get("file_path") or "").strip()
+    if file_path_value:
+        try:
+            session_patch["last_file"] = str(Path(file_path_value).relative_to(PROJECT_ROOT))
+        except Exception:
+            session_patch["last_file"] = file_path_value
+    for key, value in session_patch.items():
+        update_session(resolved_session_id, key, value)
+    return finalized
 
     if uploaded_file is not None and getattr(uploaded_file, "filename", ""):
         save_path = await _save_uploaded_attachment(uploaded_file, user_id=resolved_user_id, conversation_id=resolved_session_id)

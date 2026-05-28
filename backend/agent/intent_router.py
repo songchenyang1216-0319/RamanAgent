@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from backend.agent.types import IntentResult, NormalizedMessage
+
 
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
     """检查文本是否命中任意关键词。"""
@@ -102,7 +104,7 @@ def detect_intent(message: str) -> dict:
     if any(keyword in text for keyword in ("模型文件", "模型是否齐全", "检查模型", "模型文件正常吗")) or "artifacts" in lowered:
         return {"intent": "check_artifacts", "category": "tool", "confidence": 0.98, "params": {}}
 
-    if any(keyword in text for keyword in ("当前模型", "模型版本", "用的是哪个模型", "当前用的模型是什么")):
+    if any(keyword in text for keyword in ("当前模型", "模型版本", "用的是哪个模型", "当前用的模型是什么", "背后跑的是什么模型", "跑的是什么模型")):
         return {"intent": "get_current_model", "category": "tool", "confidence": 0.98, "params": {}}
 
     if any(
@@ -203,7 +205,6 @@ def detect_intent(message: str) -> dict:
             "联网搜索",
             "联网查一下",
             "联网查",
-            "现在",
             "今天",
             "今年",
             "最新",
@@ -250,3 +251,145 @@ def detect_intent(message: str) -> dict:
         return {"intent": "upload_help", "category": "builtin", "confidence": 0.95, "params": {}}
 
     return {"intent": "general_chat", "category": "general_chat", "confidence": 0.6, "params": {}}
+
+
+class IntentRouter:
+    """新编排层使用的意图路由器。"""
+
+    def route(self, normalized_message: NormalizedMessage) -> IntentResult:
+        message = str(normalized_message.message or "").strip()
+        lowered = message.lower()
+        file_type = str(normalized_message.file_type or "").strip().lower()
+
+        if self._is_skill_management(message, lowered):
+            return IntentResult(
+                intent="skill_management",
+                confidence=0.98,
+                reason="命中 Skill 管理关键词",
+                recommended_route="fallback",
+            )
+
+        if self._is_model_management(message, lowered):
+            return IntentResult(
+                intent="model_management",
+                confidence=0.98,
+                reason="命中模型管理关键词",
+                recommended_route="fallback",
+            )
+
+        if self._is_web_search(message, lowered):
+            return IntentResult(
+                intent="web_search",
+                confidence=0.92,
+                reason="用户明确要求联网或查询最新信息",
+                recommended_route="fallback",
+                requires_tool=True,
+            )
+
+        if normalized_message.has_file:
+            if file_type == "raman":
+                return IntentResult(
+                    intent="raman_analysis",
+                    confidence=0.98,
+                    reason="上传文件被识别为 Raman/光谱数据",
+                    recommended_route="skill",
+                    candidate_skills=["raman_spectroscopy_skill"],
+                    requires_file=True,
+                )
+            if file_type == "table":
+                return IntentResult(
+                    intent="csv_analysis",
+                    confidence=0.97,
+                    reason="上传文件被识别为 CSV/Excel 表格",
+                    recommended_route="tool",
+                    candidate_skills=["data-analysis-skill"],
+                    requires_file=True,
+                    requires_tool=True,
+                )
+            if file_type == "document":
+                return IntentResult(
+                    intent="document_processing",
+                    confidence=0.96,
+                    reason="上传文件被识别为文本文档",
+                    recommended_route="skill",
+                    requires_file=True,
+                    requires_llm=True,
+                )
+            if file_type == "image":
+                return IntentResult(
+                    intent="document_processing",
+                    confidence=0.88,
+                    reason="上传文件被识别为图片，优先交给 Skill 路由",
+                    recommended_route="skill",
+                    requires_file=True,
+                )
+
+        if any(keyword in lowered for keyword in ("raman", "sers", "光谱", "峰位", "基线校正", "sg 平滑", "sg平滑", "去噪", "浓度预测")):
+            return IntentResult(
+                intent="raman_analysis",
+                confidence=0.9,
+                reason="命中 Raman/光谱知识关键词",
+                recommended_route="model",
+                candidate_skills=["raman_spectroscopy_skill"],
+                requires_llm=True,
+            )
+
+        if any(keyword in lowered for keyword in ("csv", "excel", "表格", "缺失值", "异常值", "分组", "可视化", "列名", "基本统计")):
+            return IntentResult(
+                intent="csv_analysis",
+                confidence=0.88,
+                reason="命中表格分析关键词",
+                recommended_route="tool",
+                candidate_skills=["data-analysis-skill"],
+                requires_tool=True,
+            )
+
+        if any(keyword in lowered for keyword in ("翻译", "总结", "润色", "原文对照", "讲稿", "论文", "阅读理解", "整理")):
+            return IntentResult(
+                intent="document_processing",
+                confidence=0.86,
+                reason="命中文档处理关键词",
+                recommended_route="skill",
+                requires_llm=True,
+            )
+
+        if any(keyword in lowered for keyword in ("你好", "您好", "你是谁", "帮我解释", "agent 是什么", "agent是什么", "能做什么", "谢谢")):
+            return IntentResult(
+                intent="general_chat",
+                confidence=0.95,
+                reason="命中普通聊天/介绍类问法",
+                recommended_route="model",
+                requires_llm=True,
+            )
+
+        legacy = detect_intent(message)
+        if str(legacy.get("category") or "") == "general_chat":
+            return IntentResult(
+                intent="general_chat",
+                confidence=float(legacy.get("confidence") or 0.6),
+                reason=f"沿用旧规则意图：{legacy.get('intent')}",
+                recommended_route="model",
+                requires_llm=True,
+            )
+        return IntentResult(
+            intent="unknown",
+            confidence=0.35,
+            reason=f"低置信度，旧规则识别为 {legacy.get('intent')}",
+            recommended_route="fallback",
+        )
+
+    def _is_web_search(self, message: str, lowered: str) -> bool:
+        return any(
+            keyword in message
+            for keyword in ("联网", "搜索一下", "查一下", "查资料", "最新", "最近", "找论文", "查政策", "查价格")
+        ) or any(keyword in lowered for keyword in ("web search", "latest", "news", "paper"))
+
+    def _is_skill_management(self, message: str, lowered: str) -> bool:
+        return any(keyword in message for keyword in ("上传 Skill", "启用 Skill", "禁用 Skill", "刷新 Skill", "Skill 列表", "技能列表")) or "skill" in lowered and any(
+            keyword in lowered for keyword in ("upload", "enable", "disable", "list", "refresh")
+        )
+
+    def _is_model_management(self, message: str, lowered: str) -> bool:
+        return any(keyword in message for keyword in ("切换模型", "模型列表", "当前模型", "查看模型列表", "测试模型连通性")) or "model" in lowered and any(
+            keyword in lowered for keyword in ("switch", "list", "current", "connect")
+        )

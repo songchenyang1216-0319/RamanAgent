@@ -111,7 +111,8 @@ def test_agent_service_llm_intent_fallback_unavailable(monkeypatch):
 
     response = service.chat("你现在背后跑的是什么模型？")
     assert response["success"] is True
-    assert response["category"] == "general_chat"
+    assert response["category"] == "tool"
+    assert response["intent"] in {"get_current_model", "system_info_query"}
     assert response["reply"]
 
 

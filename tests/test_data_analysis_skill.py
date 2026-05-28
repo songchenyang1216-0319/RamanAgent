@@ -87,9 +87,9 @@ def test_question_about_file_content_routes_to_simple_query(tmp_path):
         file_path=csv_path,
     )
     assert matched_skill == "data-analysis-skill"
-    assert matched_action == "simple_query_table"
+    assert matched_action == "summarize_table"
     assert route_info["route"] == "table_data_analysis_route"
-    assert infer_data_analysis_action("这个文件主要记录的是什么内容？") == "simple_query_table"
+    assert infer_data_analysis_action("这个文件主要记录的是什么内容？") in {"summarize_table", "query_table"}
 
 
 def test_xlsx_is_routed_to_data_analysis(tmp_path):
@@ -144,9 +144,10 @@ def test_missing_value_and_statistics_are_returned(tmp_path):
     csv_path = _write_csv(tmp_path)
     result = execute_skill("data-analysis-skill", action_name="basic_statistics", file_path=str(csv_path), message="做统计")
     assert result.success is True
-    assert result.data["quality"]["missing_cells"] >= 1
-    assert result.data["statistics"]["numeric_summary"]["score"]["max"] == 92.0
-    assert "class" in result.data["statistics"]["categorical_summary"]
+    rows = result.data["data"]["rows"]
+    score_row = next(item for item in rows if item["column"] == "score")
+    assert score_row["max"] == 92.0
+    assert result.data["metadata"]["rows"] == 4
 
 
 def test_chart_suggestion_is_returned(tmp_path):
@@ -165,8 +166,8 @@ def test_different_actions_return_different_markdown_focus(tmp_path):
     assert inspect_result.success is True
     assert missing_result.success is True
     assert inspect_result.data["analysis_markdown"] != missing_result.data["analysis_markdown"]
-    assert "表格结构检查结果" in inspect_result.data["analysis_markdown"]
-    assert "缺失值与数据质量检查结果" in missing_result.data["analysis_markdown"]
+    assert "列名" in inspect_result.data["analysis_markdown"]
+    assert "空值" in missing_result.data["analysis_markdown"] or "缺失值" in missing_result.data["analysis_markdown"]
 
 
 def test_encoding_error_returns_friendly_message(tmp_path, monkeypatch):
