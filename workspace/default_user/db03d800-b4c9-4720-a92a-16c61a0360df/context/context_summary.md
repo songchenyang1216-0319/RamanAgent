@@ -1,2 +1,0 @@
-- 用户：你对普京访华的事情有什么看法？
-- 助手：模拟回复：当前使用 sensenova/deepseek-v4-flash。
