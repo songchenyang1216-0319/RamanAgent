@@ -99,15 +99,27 @@ def _normalize_figure_path(path_like: str | None) -> str:
     return relative
 
 
-def _build_sample_section(result: dict, model_info: dict, created_at: str) -> tuple[str, dict]:
+def _build_sample_section(result: dict, model_info: dict, created_at: str, context: dict | None = None) -> tuple[str, dict]:
     metadata = _extract_spectrum_metadata(result.get("sample_path"))
+    experiment_metadata = result.get("experiment_metadata", {}) or {}
+    context = context or {}
     lines = [
         "## 1. 样品信息",
+        f"- 报告标题：{context.get('title') or 'Raman 分析报告'}",
+        f"- 项目名称：{context.get('project_name') or '未绑定项目'}",
+        f"- 用户名：{context.get('username') or '未提供'}",
         f"- 文件名：{result.get('sample_file') or '未提供'}",
         f"- 分析时间：{created_at}",
         f"- 模型版本：{model_info.get('model_version') or result.get('model_version') or '未提供'}",
+        f"- 样品名称：{experiment_metadata.get('sample_name') or '未提供'}",
+        f"- 仪器信息：{experiment_metadata.get('instrument') or '未提供'}",
         f"- 数据点数量：{metadata['points']}",
         f"- 波数范围：{metadata['wavenumber_range']}",
+        "",
+        "## 1.1 原始光谱统计",
+        f"- 光谱点数：{metadata['points']}",
+        f"- 波数覆盖范围：{metadata['wavenumber_range']}",
+        f"- 预测使用单位：{result.get('unit') or '未提供'}",
         "",
     ]
     return "\n".join(lines), metadata
@@ -156,8 +168,14 @@ def _build_pipeline_section(result: dict) -> str:
         normalized.append(value)
     if "标准化" not in normalized and "归一化" not in normalized:
         normalized.append("标准化")
-    lines = ["## 3. 光谱预处理流程"]
+    lines = ["## 3. 光谱预处理流程", "- 处理说明：以下步骤用于尽量降低噪声、基线波动和采样差异对预测的影响。"]
     lines.extend(f"- {step}" for step in normalized)
+    lines.append("")
+    lines.append("## 3.1 预处理方法说明")
+    lines.append("- SG 平滑：用于抑制随机噪声并尽量保留峰形。")
+    lines.append("- ALS 去基线：用于减轻荧光背景或缓慢漂移。")
+    lines.append("- CDAE 去噪 / CAE+：用于增强模型输入稳定性。")
+    lines.append("- 标准化：用于降低不同样品采样强度差异。")
     lines.append("")
     return "\n".join(lines)
 
@@ -169,12 +187,22 @@ def _build_quality_section(professional_analysis: dict) -> str:
     issues = quality.get("issues", []) or []
     clipping = quality.get("saturation_or_clipping_check", {}) or {}
     abnormal = quality.get("abnormal_intensity_check", {}) or {}
+    overall_quality = quality.get("overall_quality") or quality.get("quality_level") or "未提供"
+    quality_score_map = {"good": 92, "acceptable": 74, "medium": 74, "poor": 46}
+    quality_score = quality_score_map.get(str(overall_quality), 60)
+    baseline_drift_score = quality_metrics.get("baseline_drift_score")
+    estimated_snr = quality_metrics.get("estimated_snr")
+    baseline_drift_flag = "是" if baseline.get("baseline_level") not in {"", "normal", None} or (baseline_drift_score is not None and float(baseline_drift_score) > 0.3) else "否"
+    abnormal_noise_flag = "是" if (estimated_snr is not None and float(estimated_snr) < 8.0) or issues else "否"
     lines = [
         "## 4. 光谱质量评价",
-        f"- 总体质量：{quality.get('overall_quality') or quality.get('quality_level') or '未提供'}",
+        f"- 总体质量：{overall_quality}",
+        f"- 谱图质量评分：{quality_score}/100",
         f"- 噪声情况：估计信噪比 {_format_number(quality_metrics.get('estimated_snr'))}",
         f"- 基线漂移：{_format_number(quality_metrics.get('baseline_drift_score'))}",
         f"- 峰形保真度：{_format_number(quality_metrics.get('peak_sharpness_score'))}",
+        f"- 是否存在明显基线漂移：{baseline_drift_flag}",
+        f"- 是否存在异常噪声：{abnormal_noise_flag}",
         f"- 异常点或饱和风险：{'存在提醒' if clipping.get('risk') or abnormal.get('risk') else '未见明显异常'}",
     ]
     if issues:
@@ -199,8 +227,11 @@ def _build_peak_section(professional_analysis: dict) -> str:
             description = annotation.get("possible_mode") if annotation else "当前峰位未命中内置提示区，建议结合全谱判断。"
             caution = annotation.get("caution") if annotation else "不做确定成分归属。"
             lines.append(
-                f"- { _format_number(peak.get('wavenumber')) } cm^-1：强度 {_format_number(peak.get('intensity'))}，"
-                f"可能解释为 {description} {caution}"
+                f"- 峰位#{peak.get('rank') or 'NA'}：索引未显式记录，波数 {_format_number(peak.get('wavenumber'))} cm^-1，"
+                f"峰强 {_format_number(peak.get('intensity'))}，显著性 {_format_number(peak.get('prominence'))}。"
+            )
+            lines.append(
+                f"- 峰位说明：可能解释为 {description} {caution}"
             )
     else:
         lines.append("- 当前未识别到足够清晰的主要峰位。")
@@ -245,7 +276,7 @@ def _build_conclusion_section(result: dict, professional_analysis: dict, llm_exp
         "",
     ]
     if llm_explanation:
-        lines.extend(["## 附：解释摘要", llm_explanation, ""])
+        lines.extend(["## 8. AI 专业解释", llm_explanation, ""])
     return "\n".join(lines), conclusion
 
 
@@ -266,6 +297,38 @@ def _build_figure_section(figures: dict) -> tuple[str, list[dict]]:
     return "\n".join(lines), entries
 
 
+def _render_section_html(section_text: str) -> str:
+    lines = [line.rstrip() for line in str(section_text or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    title = ""
+    body_parts: list[str] = []
+    bullet_buffer: list[str] = []
+
+    def flush_bullets() -> None:
+        nonlocal bullet_buffer
+        if not bullet_buffer:
+            return
+        body_parts.append("<ul>" + "".join(f"<li>{escape(item)}</li>" for item in bullet_buffer) + "</ul>")
+        bullet_buffer = []
+
+    for index, line in enumerate(lines):
+        if index == 0 and line.startswith("## "):
+            title = line[3:].strip()
+            continue
+        if line.startswith("## "):
+            flush_bullets()
+            body_parts.append(f"<h3>{escape(line[3:].strip())}</h3>")
+            continue
+        if line.startswith("- "):
+            bullet_buffer.append(line[2:].strip())
+            continue
+        flush_bullets()
+        body_parts.append(f"<p>{escape(line)}</p>")
+    flush_bullets()
+    return f"<section><h2>{escape(title or '分析内容')}</h2>{''.join(body_parts)}</section>"
+
+
 def _build_html_report(markdown_sections: dict, report_title: str, figures: list[dict], created_at: str) -> str:
     figure_html = ""
     if figures:
@@ -283,6 +346,12 @@ def _build_html_report(markdown_sections: dict, report_title: str, figures: list
             )
         if figure_cards:
             figure_html = f"<section><h2>图谱预览</h2><div class='figure-grid'>{''.join(figure_cards)}</div></section>"
+
+    sections_html = "".join(
+        _render_section_html(markdown_sections[key])
+        for key in ("sample", "prediction", "pipeline", "quality", "peaks", "history", "conclusion")
+        if markdown_sections.get(key)
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -322,6 +391,15 @@ def _build_html_report(markdown_sections: dict, report_title: str, figures: list
     }}
     h1, h2 {{
       margin-top: 0;
+    }}
+    h3 {{
+      margin: 14px 0 8px;
+      font-size: 15px;
+      color: #49615c;
+    }}
+    p {{
+      margin: 0 0 10px;
+      line-height: 1.75;
     }}
     ul {{
       margin: 0;
@@ -363,13 +441,7 @@ def _build_html_report(markdown_sections: dict, report_title: str, figures: list
       <h1>{escape(report_title)}</h1>
       <p>生成时间：{escape(created_at)}</p>
     </div>
-    <section><pre style="white-space: pre-wrap; font: inherit; margin: 0;">{escape(markdown_sections["sample"])}</pre></section>
-    <section><pre style="white-space: pre-wrap; font: inherit; margin: 0;">{escape(markdown_sections["prediction"])}</pre></section>
-    <section><pre style="white-space: pre-wrap; font: inherit; margin: 0;">{escape(markdown_sections["pipeline"])}</pre></section>
-    <section><pre style="white-space: pre-wrap; font: inherit; margin: 0;">{escape(markdown_sections["quality"])}</pre></section>
-    <section><pre style="white-space: pre-wrap; font: inherit; margin: 0;">{escape(markdown_sections["peaks"])}</pre></section>
-    <section><pre style="white-space: pre-wrap; font: inherit; margin: 0;">{escape(markdown_sections["history"])}</pre></section>
-    <section><pre style="white-space: pre-wrap; font: inherit; margin: 0;">{escape(markdown_sections["conclusion"])}</pre></section>
+    {sections_html}
     {figure_html}
     <p class="footer">本报告由 RamanAgent 自动生成，仅供实验分析参考。</p>
   </div>
@@ -378,7 +450,30 @@ def _build_html_report(markdown_sections: dict, report_title: str, figures: list
 """
 
 
-def generate_methanol_markdown_report(result: dict, llm_explanation: str | None = None) -> dict:
+class RamanReportService:
+    """统一的 Raman 报告生成服务。"""
+
+    def generate(
+        self,
+        *,
+        result: dict,
+        llm_explanation: str | None = None,
+        professional_analysis: dict | None = None,
+        model_info: dict | None = None,
+        experiment_metadata: dict | None = None,
+        context: dict | None = None,
+    ) -> dict:
+        payload = dict(result or {})
+        if professional_analysis is not None:
+            payload["professional_analysis"] = professional_analysis
+        if model_info is not None:
+            payload["model_info"] = model_info
+        if experiment_metadata is not None:
+            payload["experiment_metadata"] = experiment_metadata
+        return generate_methanol_markdown_report(payload, llm_explanation=llm_explanation, context=context)
+
+
+def generate_methanol_markdown_report(result: dict, llm_explanation: str | None = None, context: dict | None = None) -> dict:
     """生成 Markdown 报告，并同步输出 HTML 版本。"""
     ensure_dirs()
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -397,7 +492,7 @@ def generate_methanol_markdown_report(result: dict, llm_explanation: str | None 
     model_info = result.get("model_info", {}) or {}
     sanitized_explanation = _sanitize_text(llm_explanation or "未生成大模型解释。")
 
-    sample_section, sample_meta = _build_sample_section(result, model_info, created_at)
+    sample_section, sample_meta = _build_sample_section(result, model_info, created_at, context=context)
     prediction_section = _build_prediction_section(result, professional_analysis, model_info)
     pipeline_section = _build_pipeline_section(result)
     quality_section = _build_quality_section(professional_analysis)
@@ -406,7 +501,9 @@ def generate_methanol_markdown_report(result: dict, llm_explanation: str | None 
     conclusion_section, summary_text = _build_conclusion_section(result, professional_analysis, sanitized_explanation)
     figure_section, figure_entries = _build_figure_section(figures)
 
-    report_title = "# RamanAgent 甲醇光谱分析报告"
+    context = context or {}
+    report_title_text = str(context.get("title") or "RamanAgent 甲醇光谱分析报告").strip() or "RamanAgent 甲醇光谱分析报告"
+    report_title = f"# {report_title_text}"
     markdown_content = "\n".join(
         [
             report_title,
@@ -437,7 +534,7 @@ def generate_methanol_markdown_report(result: dict, llm_explanation: str | None 
         "history": history_section,
         "conclusion": conclusion_section,
     }
-    html_content = _build_html_report(html_sections, "RamanAgent 甲醇光谱分析报告", figure_entries, created_at)
+    html_content = _build_html_report(html_sections, report_title_text, figure_entries, created_at)
     html_path.write_text(html_content, encoding="utf-8")
 
     return {

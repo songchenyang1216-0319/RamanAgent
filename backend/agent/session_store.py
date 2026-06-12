@@ -16,6 +16,7 @@ _LOCK = RLock()
 _MAX_MESSAGE_CHARS = 8000
 _SUMMARY_MESSAGE_LIMIT = 20
 _SUMMARY_RECENT_MESSAGE_LIMIT = 8
+DEFAULT_USER_ID = "default_user"
 
 
 def _now_iso() -> str:
@@ -57,6 +58,18 @@ def _normalize_message_content(content: str) -> str:
     if len(safe_content) > _MAX_MESSAGE_CHARS:
         safe_content = safe_content[: _MAX_MESSAGE_CHARS - 12] + "……[已截断]"
     return safe_content
+
+
+def _normalize_user_id(user_id: str | None) -> str:
+    text = str(user_id or "").strip()
+    return text or DEFAULT_USER_ID
+
+
+def _generate_title_from_message(content: str) -> str:
+    text = re.sub(r"\s+", " ", str(content or "")).strip()
+    if not text:
+        return "新聊天"
+    return text[:20] + ("..." if len(text) > 20 else "")
 
 
 def _default_task_state() -> dict[str, Any]:
@@ -118,6 +131,7 @@ def _row_to_session_dict(row: Any, messages: list[dict[str, Any]] | None = None)
 def _row_to_message_dict(row: Any) -> dict[str, Any]:
     item = dict(row)
     payload = {
+        "message_id": str(item.get("id") or ""),
         "role": item.get("role"),
         "content": item.get("content"),
         "created_at": item.get("created_at"),
@@ -136,7 +150,7 @@ def _fetch_session_row(connection, session_id: str):
 
 
 def _fetch_messages(connection, session_id: str, limit: int | None = None) -> list[dict[str, Any]]:
-    sql = "SELECT role, content, metadata_json, created_at FROM agent_messages WHERE session_id = ? ORDER BY datetime(created_at) ASC, id ASC"
+    sql = "SELECT id, role, content, metadata_json, created_at FROM agent_messages WHERE session_id = ? ORDER BY datetime(created_at) ASC, id ASC"
     params: list[Any] = [session_id]
     if limit is not None and limit > 0:
         sql += " LIMIT ?"
@@ -244,11 +258,12 @@ def _load_session(session_id: str) -> dict[str, Any] | None:
             connection.close()
 
 
-def create_session(session_id: str | None = None) -> dict:
+def create_session(session_id: str | None = None, user_id: str | None = None) -> dict:
     """创建或返回一个会话。"""
     init_agent_memory_db()
     with _LOCK:
         resolved_session_id = str(session_id or uuid4())
+        resolved_user_id = _normalize_user_id(user_id)
         connection = get_db_connection()
         try:
             row = _fetch_session_row(connection, resolved_session_id)
@@ -257,12 +272,13 @@ def create_session(session_id: str | None = None) -> dict:
                 connection.execute(
                     """
                     INSERT INTO agent_sessions (
-                        session_id, title, created_at, updated_at,
+                        session_id, user_id, title, created_at, updated_at,
                         last_analysis_json, last_file, last_report, task_state_json, summary, is_deleted
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                     """,
                     (
                         resolved_session_id,
+                        resolved_user_id,
                         None,
                         now,
                         now,
@@ -275,8 +291,8 @@ def create_session(session_id: str | None = None) -> dict:
                 )
             else:
                 connection.execute(
-                    "UPDATE agent_sessions SET is_deleted = 0, updated_at = ? WHERE session_id = ?",
-                    (now, resolved_session_id),
+                    "UPDATE agent_sessions SET user_id = COALESCE(NULLIF(user_id, ''), ?), is_deleted = 0, updated_at = ? WHERE session_id = ?",
+                    (resolved_user_id, now, resolved_session_id),
                 )
             connection.commit()
             session = get_session(resolved_session_id)
@@ -285,6 +301,7 @@ def create_session(session_id: str | None = None) -> dict:
             if session is None:
                 session = {
                     "session_id": resolved_session_id,
+                    "user_id": resolved_user_id,
                     "created_at": now,
                     "updated_at": now,
                     "messages": [],
@@ -360,6 +377,13 @@ def update_session(session_id: str, key: str, value) -> dict:
                     (None if value in {None, ""} else str(value), now, resolved_session_id),
                 )
                 session["title"] = None if value in {None, ""} else str(value)
+            elif key == "user_id":
+                normalized_user_id = _normalize_user_id(value)
+                connection.execute(
+                    "UPDATE agent_sessions SET user_id = ?, updated_at = ?, is_deleted = 0 WHERE session_id = ?",
+                    (normalized_user_id, now, resolved_session_id),
+                )
+                session["user_id"] = normalized_user_id
             elif key == "is_deleted":
                 connection.execute(
                     "UPDATE agent_sessions SET is_deleted = ?, updated_at = ? WHERE session_id = ?",
@@ -445,7 +469,7 @@ def get_recent_messages(session_id: str, limit: int = 8) -> list[dict]:
         connection = get_db_connection()
         try:
             limit = max(int(limit or 0), 0)
-            sql = "SELECT role, content, metadata_json, created_at FROM agent_messages WHERE session_id = ? ORDER BY datetime(created_at) DESC, id DESC"
+            sql = "SELECT id, role, content, metadata_json, created_at FROM agent_messages WHERE session_id = ? ORDER BY datetime(created_at) DESC, id DESC"
             params: list[Any] = [resolved_session_id]
             if limit > 0:
                 sql += " LIMIT ?"
@@ -485,6 +509,11 @@ def append_message(session_id: str, role: str, content: str, metadata: dict | No
                 "UPDATE agent_sessions SET updated_at = ?, is_deleted = 0 WHERE session_id = ?",
                 (now, resolved_session_id),
             )
+            if str(role or "").strip().lower() == "user" and not str(session.get("title") or "").strip():
+                connection.execute(
+                    "UPDATE agent_sessions SET title = ? WHERE session_id = ? AND (title IS NULL OR title = '')",
+                    (_generate_title_from_message(safe_content), resolved_session_id),
+                )
             _maybe_refresh_summary(connection, resolved_session_id)
             connection.commit()
             refreshed = get_session(resolved_session_id)
@@ -553,6 +582,94 @@ def delete_session(session_id: str) -> dict:
             }
         finally:
             connection.close()
+
+
+def list_sessions(user_id: str | None = None, limit: int = 50, include_deleted: bool = False) -> list[dict[str, Any]]:
+    """列出当前用户的会话摘要。"""
+    init_agent_memory_db()
+    resolved_user_id = _normalize_user_id(user_id)
+    with _LOCK:
+        connection = get_db_connection()
+        try:
+            sql = """
+                SELECT
+                    s.*,
+                    COUNT(m.id) AS message_count,
+                    MAX(m.created_at) AS last_message_at
+                FROM agent_sessions s
+                LEFT JOIN agent_messages m ON m.session_id = s.session_id
+                WHERE s.user_id = ?
+            """
+            params: list[Any] = [resolved_user_id]
+            if not include_deleted:
+                sql += " AND s.is_deleted = 0"
+            sql += " GROUP BY s.id ORDER BY datetime(s.updated_at) DESC, s.id DESC LIMIT ?"
+            params.append(max(1, min(int(limit or 50), 200)))
+            rows = connection.execute(sql, params).fetchall()
+            return [_conversation_summary_from_row(row) for row in rows]
+        finally:
+            connection.close()
+
+
+def search_sessions(user_id: str | None, query: str, limit: int = 30) -> list[dict[str, Any]]:
+    """按标题或消息内容搜索会话。"""
+    init_agent_memory_db()
+    resolved_user_id = _normalize_user_id(user_id)
+    keyword = str(query or "").strip()
+    if not keyword:
+        return list_sessions(resolved_user_id, limit=limit)
+    like = f"%{keyword}%"
+    with _LOCK:
+        connection = get_db_connection()
+        try:
+            rows = connection.execute(
+                """
+                SELECT
+                    s.*,
+                    COUNT(DISTINCT m_all.id) AS message_count,
+                    MAX(m_all.created_at) AS last_message_at
+                FROM agent_sessions s
+                LEFT JOIN agent_messages m_all ON m_all.session_id = s.session_id
+                LEFT JOIN agent_messages m_match ON m_match.session_id = s.session_id
+                WHERE s.user_id = ?
+                  AND s.is_deleted = 0
+                  AND (s.title LIKE ? OR s.summary LIKE ? OR m_match.content LIKE ?)
+                GROUP BY s.id
+                ORDER BY datetime(s.updated_at) DESC, s.id DESC
+                LIMIT ?
+                """,
+                (resolved_user_id, like, like, like, max(1, min(int(limit or 30), 100))),
+            ).fetchall()
+            return [_conversation_summary_from_row(row) for row in rows]
+        finally:
+            connection.close()
+
+
+def rename_session(session_id: str, title: str) -> dict:
+    """重命名会话。"""
+    clean_title = str(title or "").strip()
+    if not clean_title:
+        raise ValueError("标题不能为空。")
+    return update_session(session_id, "title", clean_title[:80])
+
+
+def _conversation_summary_from_row(row: Any) -> dict[str, Any]:
+    item = dict(row)
+    message_count = int(item.get("message_count") or 0)
+    return {
+        "conversation_id": item.get("session_id"),
+        "session_id": item.get("session_id"),
+        "user_id": item.get("user_id") or DEFAULT_USER_ID,
+        "title": item.get("title") or "新聊天",
+        "summary": item.get("summary") or "",
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
+        "last_message_at": item.get("last_message_at"),
+        "message_count": message_count,
+        "last_file": item.get("last_file"),
+        "last_report": item.get("last_report"),
+        "is_deleted": bool(item.get("is_deleted")),
+    }
 
 
 def clear_sessions() -> None:

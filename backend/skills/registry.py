@@ -13,6 +13,16 @@ from raman_core.methanol.config import PROJECT_ROOT
 from .agent_system_skill import AgentSystemSkill
 from .base import BaseSkill, SkillResult
 from .data_analysis_skill import DataAnalysisSkill
+from .general_skills import (
+    CodeAssistantSkill,
+    DocumentReaderSkill,
+    FileConverterSkill,
+    GeneralChatSkill,
+    ImageUnderstandingSkill,
+    ReportGeneratorSkill,
+    TableAnalysisAliasSkill,
+    WorkspaceManagerSkill,
+)
 from .image_router_skill import ImageRouterSkill
 from .raman_spectroscopy_skill import RamanSpectroscopySkill
 from .web_search.web_search_skill import WebSearchSkill
@@ -384,6 +394,14 @@ def match_uploaded_skill(message: str, file_suffix: str | None = None) -> tuple[
     return best_skill, {"score": best_score, "reason": best_reason, "route": "uploaded_skill_match"}
 
 
+register_skill(GeneralChatSkill())
+register_skill(DocumentReaderSkill())
+register_skill(TableAnalysisAliasSkill())
+register_skill(FileConverterSkill())
+register_skill(ReportGeneratorSkill())
+register_skill(ImageUnderstandingSkill())
+register_skill(CodeAssistantSkill())
+register_skill(WorkspaceManagerSkill())
 register_skill(RamanSpectroscopySkill())
 register_skill(ImageRouterSkill())
 register_skill(DataAnalysisSkill())

@@ -1,5 +1,76 @@
 {
   "skills": {
+    "general-chat": {
+      "enabled": true,
+      "actions": {
+        "default": true
+      }
+    },
+    "document-reader": {
+      "enabled": true,
+      "actions": {
+        "summarize": true,
+        "outline": true,
+        "extract_key_points": true,
+        "translate": true,
+        "polish": true
+      }
+    },
+    "table-analysis": {
+      "enabled": true,
+      "actions": {
+        "count_records": true,
+        "groupby_count": true,
+        "groupby_statistics": true,
+        "query_table": true,
+        "sort_table": true,
+        "top_n": true,
+        "missing_value_check": true,
+        "basic_statistics": true,
+        "visualize_table": true,
+        "clean_table": true,
+        "summarize_table": true,
+        "clarify": true,
+        "inspect_table": true,
+        "chart_suggestion": true,
+        "categorical_summary": true,
+        "simple_query_table": true,
+        "export_clean_preview": true
+      }
+    },
+    "file-converter": {
+      "enabled": true,
+      "actions": {
+        "convert_file": true
+      }
+    },
+    "report-generator": {
+      "enabled": true,
+      "actions": {
+        "generate_markdown": true
+      }
+    },
+    "image-understanding": {
+      "enabled": true,
+      "actions": {
+        "classify_image_type": true,
+        "analyze_general_image": true,
+        "ocr_extract_text": true,
+        "image_quality_check": true
+      }
+    },
+    "code-assistant": {
+      "enabled": true,
+      "actions": {
+        "explain_code": true
+      }
+    },
+    "workspace-manager": {
+      "enabled": true,
+      "actions": {
+        "default": true
+      }
+    },
     "raman_spectroscopy_skill": {
       "enabled": true,
       "actions": {

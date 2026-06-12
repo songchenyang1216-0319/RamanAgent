@@ -27,6 +27,31 @@ def _split_models(value: str) -> list[str]:
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
 
+def _looks_like_placeholder_secret(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return True
+    lowered = text.lower()
+    placeholder_markers = (
+        "your_",
+        "your-",
+        "replace_me",
+        "placeholder",
+        "example",
+        "demo",
+        "test_key",
+        "fake_key",
+        "dummy",
+        "<api_key>",
+        "api_key_here",
+    )
+    if any(marker in lowered for marker in placeholder_markers):
+        return True
+    if lowered.endswith("_api_key") or lowered == "api_key":
+        return True
+    return False
+
+
 def _title_from_model(model_id: str) -> str:
     text = str(model_id or "").strip()
     if not text:
@@ -297,12 +322,15 @@ class ModelRegistry:
             default_model = _env(spec["default_model_env"], spec["default_model"])
             if default_model not in available_models and available_models:
                 default_model = available_models[0]
-            configured = bool(base_url) if provider_id == "ollama" else bool(api_key)
+            has_real_api_key = not _looks_like_placeholder_secret(api_key)
+            configured = bool(base_url) if provider_id == "ollama" else has_real_api_key
             reason = ""
             if not base_url:
                 reason = f"{spec['base_url_env']} 未配置"
             elif provider_id != "ollama" and not api_key:
                 reason = f"{spec['api_key_env']} 未配置"
+            elif provider_id != "ollama" and not has_real_api_key:
+                reason = f"{spec['api_key_env']} 仍是示例占位值，请填写真实 API Key"
 
             providers[provider_id] = {
                 "provider_id": provider_id,

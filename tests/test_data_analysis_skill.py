@@ -59,6 +59,7 @@ def test_data_analysis_skill_is_listed():
     payload = list_skills(include_actions=True)
     names = {item.get("name") for item in payload.get("skills") or []}
     assert "data-analysis-skill" in names
+    assert "table-analysis" in names
     target = next(item for item in payload["skills"] if item.get("name") == "data-analysis-skill")
     action_names = {action.get("name") for action in target.get("actions") or []}
     assert "inspect_table" in action_names
@@ -73,7 +74,7 @@ def test_csv_is_routed_to_data_analysis(tmp_path):
         file_suffix=".csv",
         file_path=csv_path,
     )
-    assert matched_skill == "data-analysis-skill"
+    assert matched_skill == "table-analysis"
     assert matched_action in {"simple_query_table", "summarize_table", "missing_value_check"}
     assert route_info["route"] == "table_data_analysis_route"
 
@@ -86,7 +87,7 @@ def test_question_about_file_content_routes_to_simple_query(tmp_path):
         file_suffix=".csv",
         file_path=csv_path,
     )
-    assert matched_skill == "data-analysis-skill"
+    assert matched_skill == "table-analysis"
     assert matched_action == "summarize_table"
     assert route_info["route"] == "table_data_analysis_route"
     assert infer_data_analysis_action("这个文件主要记录的是什么内容？") in {"summarize_table", "query_table"}
@@ -100,7 +101,7 @@ def test_xlsx_is_routed_to_data_analysis(tmp_path):
         file_suffix=".xlsx",
         file_path=xlsx_path,
     )
-    assert matched_skill == "data-analysis-skill"
+    assert matched_skill == "table-analysis"
     assert route_info["route"] == "table_data_analysis_route"
 
 
@@ -112,7 +113,7 @@ def test_plain_csv_will_not_enter_raman(tmp_path):
         file_suffix=".csv",
         file_path=csv_path,
     )
-    assert matched_skill == "data-analysis-skill"
+    assert matched_skill == "table-analysis"
 
 
 def test_raman_keywords_and_csv_will_enter_raman(tmp_path):
@@ -198,7 +199,7 @@ def test_disabled_data_analysis_skill_returns_friendly_prompt(tmp_path, monkeypa
 
     def fake_load():
         config, error = real_loader()
-        config["skills"]["data-analysis-skill"]["enabled"] = False
+        config["skills"]["table-analysis"]["enabled"] = False
         return config, error
 
     monkeypatch.setattr("backend.skills.registry._load_skills_config", fake_load)
@@ -209,7 +210,7 @@ def test_disabled_data_analysis_skill_returns_friendly_prompt(tmp_path, monkeypa
     )
     payload = response.json()
     assert payload["success"] is False
-    assert "data-analysis-skill" in payload["error_message"] or "表格数据分析 Skill" in payload["reply"]
+    assert "table-analysis" in payload["error_message"] or "表格分析 Skill" in payload["reply"]
 
 
 def test_disabled_data_analysis_action_returns_friendly_prompt(tmp_path, monkeypatch):
@@ -219,8 +220,8 @@ def test_disabled_data_analysis_action_returns_friendly_prompt(tmp_path, monkeyp
 
     def fake_load():
         config, error = real_loader()
-        config["skills"]["data-analysis-skill"]["enabled"] = True
-        config["skills"]["data-analysis-skill"]["actions"]["missing_value_check"] = False
+        config["skills"]["table-analysis"]["enabled"] = True
+        config["skills"]["table-analysis"]["actions"]["missing_value_check"] = False
         return config, error
 
     monkeypatch.setattr("backend.skills.registry._load_skills_config", fake_load)

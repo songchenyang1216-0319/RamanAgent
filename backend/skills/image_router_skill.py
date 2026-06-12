@@ -36,8 +36,8 @@ class ImageRouterSkill(BaseSkill):
     skill_mode = "executable"
 
     def __init__(self) -> None:
-        self._registry = ModelRegistry()
-        self._model_router = ModelRouter(registry=self._registry)
+        self._registry: ModelRegistry | None = None
+        self._model_router: ModelRouter | None = None
         self.actions = [
             self._action("classify_image_type", "判断图片类型。"),
             self._action("analyze_raman_spectrum_image", "Raman / SERS / 光谱图像分析。"),
@@ -164,6 +164,10 @@ class ImageRouterSkill(BaseSkill):
         user_id: str | None,
         conversation_id: str | None,
     ) -> dict[str, Any]:
+        if self._registry is None:
+            self._registry = ModelRegistry()
+        if self._model_router is None:
+            self._model_router = ModelRouter(registry=self._registry)
         self._registry.reload()
         selection = self._model_router.resolve_selection(
             provider_id=provider_id,

@@ -13,18 +13,49 @@ class Planner:
         self.table_query_planner = TableQueryPlanner()
 
     def make_plan(self, normalized: NormalizedMessage, intent: IntentResult) -> AgentPlan:
+        if intent.intent in {"conversation_rag", "knowledge_base_rag", "mixed_rag"}:
+            rag_scope = {
+                "conversation_rag": "conversation",
+                "knowledge_base_rag": "knowledge_base",
+                "mixed_rag": "mixed",
+            }.get(intent.intent, normalized.rag_scope or "conversation")
+            if normalized.rag_scope in {"conversation", "knowledge_base", "mixed"}:
+                rag_scope = normalized.rag_scope
+            return AgentPlan(
+                route_type="rag",
+                rag_scope=rag_scope,
+                knowledge_base_ids=list(normalized.knowledge_base_ids or []),
+                model_provider=normalized.provider_id,
+                model_name=normalized.model_id,
+                steps=[
+                    "retrieve_conversation_files" if rag_scope in {"conversation", "mixed"} else "skip_conversation_files",
+                    "retrieve_knowledge_base" if rag_scope in {"knowledge_base", "mixed"} else "skip_knowledge_base",
+                    "call_model_with_citations",
+                    "build_response",
+                ],
+            )
+
         if normalized.file_type == "image":
             image_action = "ocr_extract_text" if any(keyword in normalized.message for keyword in ("文字", "OCR", "提取", "识别")) else "classify_image_type"
             return AgentPlan(
                 route_type="skill",
-                skill_name="image-router-skill",
+                skill_name="image-understanding",
                 skill_mode="executable",
                 action_name=image_action,
                 steps=["run_image_skill", "build_response"],
             )
 
         uploaded_skill, _ = match_uploaded_skill(normalized.message, file_suffix=normalized.file_suffix)
-        if uploaded_skill is not None and intent.intent not in {"csv_analysis", "raman_analysis"}:
+        reserved_intents = {
+            "csv_analysis",
+            "document_processing",
+            "file_conversion",
+            "conversation_rag",
+            "knowledge_base_rag",
+            "mixed_rag",
+            "raman_analysis",
+        }
+        if uploaded_skill is not None and intent.intent not in reserved_intents:
             return AgentPlan(
                 route_type="skill",
                 skill_name=uploaded_skill.name,
@@ -41,7 +72,41 @@ class Planner:
                 steps=["call_model", "build_response"],
             )
 
-        if intent.intent in {"model_management", "skill_management", "web_search", "unknown"}:
+        if intent.intent == "web_search":
+            return AgentPlan(
+                route_type="skill",
+                skill_name="web-search",
+                skill_mode="executable",
+                action_name="answer_with_sources",
+                steps=["run_web_search_skill", "build_response"],
+            )
+
+        if intent.intent == "file_info":
+            return AgentPlan(
+                route_type="tool",
+                tool_name="file_info_tool",
+                steps=["read_file_metadata", "build_response"],
+            )
+
+        if intent.intent == "report_generation":
+            return AgentPlan(
+                route_type="skill",
+                skill_name="report-generator",
+                skill_mode="executable",
+                action_name="generate_markdown",
+                steps=["collect_workspace_context", "run_report_generator", "build_response"],
+            )
+
+        if intent.intent == "file_conversion":
+            return AgentPlan(
+                route_type="skill",
+                skill_name="file-converter",
+                skill_mode="executable",
+                action_name="convert_file",
+                steps=["validate_source_file", "convert_file", "build_response"],
+            )
+
+        if intent.intent in {"model_management", "skill_management", "unknown"}:
             return AgentPlan(
                 route_type="fallback",
                 steps=["legacy_fallback", "build_response"],
@@ -64,6 +129,23 @@ class Planner:
             )
 
         if intent.intent == "document_processing":
+            if normalized.has_file:
+                document_action = "summarize"
+                if any(keyword in normalized.message for keyword in ("大纲", "目录", "结构")):
+                    document_action = "outline"
+                elif any(keyword in normalized.message for keyword in ("重点", "要点", "关键信息")):
+                    document_action = "extract_key_points"
+                elif any(keyword in normalized.message for keyword in ("翻译", "译成")):
+                    document_action = "translate"
+                elif any(keyword in normalized.message for keyword in ("润色", "改写")):
+                    document_action = "polish"
+                return AgentPlan(
+                    route_type="skill",
+                    skill_name="document-reader",
+                    skill_mode="executable",
+                    action_name=document_action,
+                    steps=["retrieve_file_chunks", "run_document_reader", "build_response"],
+                )
             uploaded_skill, _ = match_uploaded_skill(normalized.message, file_suffix=normalized.file_suffix)
             if uploaded_skill is not None:
                 return AgentPlan(
@@ -74,11 +156,29 @@ class Planner:
                     steps=["run_skill", "build_response"],
                 )
             return AgentPlan(
-                route_type="model" if not normalized.has_file else "tool",
-                tool_name="document_tool" if normalized.has_file else None,
+                route_type="model",
+                tool_name=None,
                 model_provider=normalized.provider_id,
                 model_name=normalized.model_id,
-                steps=["extract_document", "call_model", "build_response"] if normalized.has_file else ["call_model", "build_response"],
+                steps=["call_model", "build_response"],
+            )
+
+        if intent.intent == "code_analysis":
+            return AgentPlan(
+                route_type="skill",
+                skill_name="code-assistant",
+                skill_mode="executable",
+                action_name="explain_code",
+                steps=["read_code_file", "run_code_assistant", "build_response"],
+            )
+
+        if intent.intent == "image_understanding":
+            return AgentPlan(
+                route_type="skill",
+                skill_name="image-understanding",
+                skill_mode="executable",
+                action_name="ocr_extract_text" if any(keyword in normalized.message for keyword in ("文字", "OCR", "提取", "识别")) else "classify_image_type",
+                steps=["run_image_skill", "build_response"],
             )
 
         if intent.intent == "csv_analysis":
@@ -98,7 +198,7 @@ class Planner:
                     if query_plan.action not in {"summarize_table", "clarify"}:
                         return AgentPlan(
                             route_type="skill",
-                            skill_name="data-analysis-skill",
+                            skill_name="table-analysis",
                             skill_mode="executable",
                             action_name=query_plan.action,
                             steps=["run_data_analysis_skill", "build_response"],
@@ -107,7 +207,7 @@ class Planner:
                     if query_plan.action == "summarize_table":
                         return AgentPlan(
                             route_type="skill",
-                            skill_name="data-analysis-skill",
+                            skill_name="table-analysis",
                             skill_mode="executable",
                             action_name="summarize_table",
                             steps=["run_data_analysis_skill", "build_response"],
@@ -116,7 +216,7 @@ class Planner:
                     if query_plan.action == "clarify":
                         return AgentPlan(
                             route_type="skill",
-                            skill_name="data-analysis-skill",
+                            skill_name="table-analysis",
                             skill_mode="executable",
                             action_name="clarify",
                             steps=["run_data_analysis_skill", "build_response"],

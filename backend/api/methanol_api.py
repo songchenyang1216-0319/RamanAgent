@@ -6,9 +6,12 @@ import re
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from backend.agent.tools.spectral_tools.spectral_summary_tool import analyze_spectrum_professionally
+from backend.api.auth_dependencies import get_request_user_context
 from backend.schemas.methanol_schema import (
     ArtifactCheckItem,
     ArtifactCheckResponse,
@@ -16,15 +19,23 @@ from backend.schemas.methanol_schema import (
     ExplainResultRequest,
     ExplainResultResponse,
 )
+from backend.services.batch_analysis_service import BatchAnalysisService
+from backend.services.file_service import FileCatalogService
 from backend.services.history_service import save_analysis_history
 from backend.services.llm_service import LLMService
 from backend.services.model_registry_service import ModelRegistryService
 from backend.services.report_service import generate_methanol_markdown_report
 from backend.services.methanol_service import predict_methanol
+from backend.services.task_trace_manager import TaskTraceManager
+from backend.services.workspace_manager import DEFAULT_USER_ID, WorkspaceManager
 from raman_core.methanol.config import ARTIFACT_DIR, DEMO_DATA_DIR, PROJECT_ROOT, RAW_DATA_DIR, ensure_dirs
 
 
 router = APIRouter(prefix="/api/methanol", tags=["methanol"])
+workspace_manager = WorkspaceManager()
+task_trace_manager = TaskTraceManager(workspace_manager=workspace_manager)
+file_catalog = FileCatalogService()
+batch_analysis_service = BatchAnalysisService(file_catalog=file_catalog, task_trace_manager=task_trace_manager, workspace_manager=workspace_manager)
 
 REQUIRED_ARTIFACTS = [
     "cdae_display_model.pt",
@@ -106,21 +117,45 @@ def build_report_web_urls(report: dict) -> dict:
 async def predict(
     file: UploadFile = File(...),
     debug: bool = Query(default=False, description="是否返回 intermediate 中间光谱数组。"),
+    user_id: str = Form(default=DEFAULT_USER_ID),
+    conversation_id: str | None = Form(default="methanol-api"),
+    project_id: str | None = Form(default=None),
+    current_user: dict = Depends(get_request_user_context),
 ) -> dict:
     """接收上传的 CSV 文件，保存后执行甲醇预测。"""
+    effective_user_id = current_user["user_id"] if current_user.get("authenticated") else user_id
+    task = task_trace_manager.create_task(
+        user_id=effective_user_id,
+        conversation_id=conversation_id,
+        intent="raman_predict",
+        input_message=f"分析文件 {file.filename or 'uploaded.csv'}",
+        input_files=[],
+        project_id=project_id,
+    )
     save_path = await save_uploaded_csv(file)
 
     try:
         result = predict_methanol(save_path, include_intermediate=debug)
     except FileNotFoundError as exc:
+        task_trace_manager.update_task(task["task_id"], status="failed", progress=100, error_message=str(exc))
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except ValueError as exc:
+        task_trace_manager.update_task(task["task_id"], status="failed", progress=100, error_message=str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
+        task_trace_manager.update_task(task["task_id"], status="failed", progress=100, error_message=str(exc))
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    task_trace_manager.update_task(
+        task["task_id"],
+        status="success",
+        progress=100,
+        result_path=str(save_path.relative_to(PROJECT_ROOT)),
+    )
 
     return {
         "success": True,
+        "task_id": task["task_id"],
         "saved_file": str(save_path.relative_to(PROJECT_ROOT)),
         "debug": debug,
         "result": result,
@@ -187,24 +222,44 @@ def predict_demo(
     debug: bool = Query(default=False, description="是否返回 intermediate 中间光谱数组。"),
 ) -> dict:
     """使用 data/demo 中的样例文件执行预测。"""
+    task = task_trace_manager.create_task(
+        user_id=DEFAULT_USER_ID,
+        conversation_id="methanol-demo",
+        intent="raman_demo_predict",
+        input_message=f"分析 demo 文件 {request.file_name}",
+        input_files=[],
+    )
     ensure_dirs()
     target = DEMO_DATA_DIR / Path(request.file_name).name
     if target.suffix.lower() != ".csv":
+        task_trace_manager.update_task(task["task_id"], status="failed", progress=100, error_message="demo 文件必须是 .csv。")
         raise HTTPException(status_code=400, detail="demo 文件必须是 .csv。")
     if not target.exists():
+        task_trace_manager.update_task(task["task_id"], status="failed", progress=100, error_message=f"demo 文件不存在: {request.file_name}")
         raise HTTPException(status_code=404, detail=f"demo 文件不存在: {request.file_name}")
 
     try:
         result = predict_methanol(target, include_intermediate=debug)
     except FileNotFoundError as exc:
+        task_trace_manager.update_task(task["task_id"], status="failed", progress=100, error_message=str(exc))
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except ValueError as exc:
+        task_trace_manager.update_task(task["task_id"], status="failed", progress=100, error_message=str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
+        task_trace_manager.update_task(task["task_id"], status="failed", progress=100, error_message=str(exc))
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    task_trace_manager.update_task(
+        task["task_id"],
+        status="success",
+        progress=100,
+        result_path=str(target.relative_to(PROJECT_ROOT)),
+    )
 
     return {
         "success": True,
+        "task_id": task["task_id"],
         "saved_file": str(target.relative_to(PROJECT_ROOT)),
         "debug": debug,
         "result": result,
@@ -216,17 +271,33 @@ async def predict_report(
     file: UploadFile = File(...),
     explain: bool = Query(default=True, description="是否调用大模型生成结果解释。"),
     debug: bool = Query(default=False, description="是否返回 intermediate 中间光谱数组。"),
+    user_id: str = Form(default=DEFAULT_USER_ID),
+    conversation_id: str | None = Form(default="methanol-report"),
+    project_id: str | None = Form(default=None),
+    current_user: dict = Depends(get_request_user_context),
 ) -> dict:
     """上传 CSV 后完成预测、解释和 Markdown 报告生成。"""
+    effective_user_id = current_user["user_id"] if current_user.get("authenticated") else user_id
+    task = task_trace_manager.create_task(
+        user_id=effective_user_id,
+        conversation_id=conversation_id,
+        intent="raman_predict_report",
+        input_message=f"生成报告 {file.filename or 'uploaded.csv'}",
+        input_files=[],
+        project_id=project_id,
+    )
     save_path = await save_uploaded_csv(file)
 
     try:
         result = predict_methanol(save_path, include_intermediate=debug)
     except FileNotFoundError as exc:
+        task_trace_manager.update_task(task["task_id"], status="failed", progress=100, error_message=str(exc))
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except ValueError as exc:
+        task_trace_manager.update_task(task["task_id"], status="failed", progress=100, error_message=str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
+        task_trace_manager.update_task(task["task_id"], status="failed", progress=100, error_message=str(exc))
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     llm_explanation = "未生成大模型解释"
@@ -246,8 +317,31 @@ async def predict_report(
     result["experiment_metadata"] = {}
 
     report = generate_methanol_markdown_report(result, llm_explanation)
+    workspace_manager.register_existing_file(
+        effective_user_id,
+        conversation_id,
+        PROJECT_ROOT / str(report.get("report_markdown_path") or ""),
+        original_name=report.get("report_markdown_file"),
+        kind="output",
+        project_id=project_id,
+    )
+    workspace_manager.register_existing_file(
+        effective_user_id,
+        conversation_id,
+        PROJECT_ROOT / str(report.get("report_html_path") or ""),
+        original_name=report.get("report_html_file"),
+        kind="output",
+        project_id=project_id,
+    )
+    task_trace_manager.update_task(
+        task["task_id"],
+        status="success",
+        progress=100,
+        result_path=str(report.get("report_html_path") or report.get("report_markdown_path") or ""),
+    )
     response_payload = {
         "success": True,
+        "task_id": task["task_id"],
         "saved_file": str(save_path.relative_to(PROJECT_ROOT)),
         "debug": debug,
         "explain": explain,
@@ -267,3 +361,49 @@ async def predict_report(
     except Exception as exc:
         response_payload["history_error"] = str(exc)
     return response_payload
+
+
+class BatchAnalyzePayload(BaseModel):
+    file_ids: list[str]
+    project_id: str | None = None
+    options: dict | None = None
+
+
+@router.post("/batch-analyze")
+def batch_analyze(payload: BatchAnalyzePayload, current_user: dict = Depends(get_request_user_context)) -> dict:
+    try:
+        return batch_analysis_service.batch_analyze(
+            user_id=current_user["user_id"],
+            conversation_id=payload.project_id or "raman-batch",
+            file_ids=payload.file_ids,
+            project_id=payload.project_id,
+            options=payload.options or {},
+            is_admin=current_user["is_admin"],
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"message": str(exc), "error_code": "BATCH_ANALYZE_FORBIDDEN", "error_message": str(exc), "suggestion": "请确认这些文件都属于当前用户。"}) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"message": str(exc), "error_code": "BATCH_ANALYZE_NOT_FOUND", "error_message": str(exc), "suggestion": "请确认文件或项目是否存在。"}) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={"message": str(exc), "error_code": "BATCH_ANALYZE_FAILED", "error_message": str(exc), "suggestion": "请检查请求参数和文件格式后重试。"}) from exc
+
+
+@router.get("/batch-tasks/{task_id}/summary")
+def get_batch_summary(task_id: str, current_user: dict = Depends(get_request_user_context)) -> dict:
+    try:
+        summary = batch_analysis_service.get_batch_summary(task_id, user_id=current_user["user_id"], is_admin=current_user["is_admin"])
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"message": str(exc), "error_code": "BATCH_SUMMARY_NOT_FOUND", "error_message": str(exc), "suggestion": "请确认批量任务是否存在。"}) from exc
+    return {"success": True, "task_id": task_id, "summary": summary}
+
+
+@router.get("/batch-tasks/{task_id}/download-csv")
+def download_batch_summary_csv(task_id: str, current_user: dict = Depends(get_request_user_context)):
+    result = task_trace_manager.get_task_result(task_id, user_id=current_user["user_id"], is_admin=current_user["is_admin"])
+    path_text = str(result.get("result_path") or "").strip()
+    if not path_text:
+        raise HTTPException(status_code=404, detail={"message": "当前批量任务暂无可下载 CSV。", "error_code": "BATCH_CSV_NOT_FOUND", "error_message": "当前批量任务暂无可下载 CSV。", "suggestion": "请等待任务完成后重试。"})
+    path = (PROJECT_ROOT / path_text).resolve()
+    if not path.exists():
+        raise HTTPException(status_code=404, detail={"message": "批量结果 CSV 文件不存在。", "error_code": "BATCH_CSV_MISSING", "error_message": "批量结果 CSV 文件不存在。", "suggestion": "请重新执行批量分析。"})
+    return FileResponse(path=path, filename=path.name, media_type="text/csv; charset=utf-8")

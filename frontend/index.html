@@ -8,6 +8,25 @@
 </head>
 <body>
   <div class="app-shell">
+    <aside class="agent-sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-mark">RA</div>
+        <div>
+          <strong>RamanAgent</strong>
+          <span>通用 Agent 平台</span>
+        </div>
+      </div>
+      <button id="sidebarNewSessionBtn" type="button" class="sidebar-new-chat">新建聊天</button>
+      <label class="sidebar-search">
+        <span>搜索聊天</span>
+        <input id="conversationSearch" type="search" placeholder="搜索标题或消息" />
+      </label>
+      <nav id="conversationList" class="conversation-list" aria-label="聊天记录"></nav>
+      <div class="sidebar-user">
+        <span id="sidebarUserLabel">default_user</span>
+      </div>
+    </aside>
+
     <header class="topbar">
       <div class="topbar-left">
         <div class="brand-small">Multi-Skill Agent</div>
@@ -52,24 +71,63 @@
               <div id="modelListBody" class="model-list-body"></div>
             </div>
           </div>
-          <button id="recentExperimentBtn" type="button" class="pill-button" data-question="最近记录">最近记录</button>
-          <button id="workspaceButton" type="button" class="pill-button">工作区</button>
+          <button id="workspaceButton" type="button" class="pill-button">工作区文件</button>
+          <button id="knowledgeBaseButton" type="button" class="pill-button">知识库</button>
           <button id="skillsManageBtn" type="button" class="pill-button">Skills 管理</button>
-          <button id="refreshDashboardBtn" type="button" class="pill-button">刷新</button>
-          <label class="debug-switch compact">
-            <input id="chatDebug" type="checkbox" />
-            <span>debug</span>
-          </label>
-          <button id="newSessionBtn" type="button" class="pill-button ghost">新会话</button>
-          <button id="clearMemoryBtn" type="button" class="pill-button ghost">清空记忆</button>
-          <button id="inspectMemoryBtn" type="button" class="pill-button ghost">查看记忆</button>
         </div>
 
+        <div class="session-row">
+          <span id="currentUserBar">当前用户：未登录</span>
+        </div>
         <div class="session-row">
           <span>会话 ID：<strong id="sessionIdText">未创建</strong></span>
         </div>
       </div>
     </header>
+
+    <section class="dashboard-shell">
+      <details class="dashboard-card" open>
+        <summary>
+          <span>登录 / 注册</span>
+          <button id="refreshAuthBtn" type="button" class="mini-ghost-button">刷新</button>
+        </summary>
+        <div id="authPanelBody" class="dashboard-card-body"></div>
+      </details>
+
+      <div id="phase2Panels" class="phase2-panels hidden">
+        <details class="dashboard-card" open>
+          <summary>
+            <span>项目中心</span>
+            <button id="refreshProjectsBtn" type="button" class="mini-ghost-button">刷新</button>
+          </summary>
+          <div id="projectPanelBody" class="dashboard-card-body"></div>
+        </details>
+
+        <details class="dashboard-card" open>
+          <summary>
+            <span>文件中心</span>
+            <button id="refreshFilesBtn" type="button" class="mini-ghost-button">刷新</button>
+          </summary>
+          <div id="fileCenterBody" class="dashboard-card-body"></div>
+        </details>
+
+        <details class="dashboard-card" open>
+          <summary>
+            <span>任务中心</span>
+            <button id="refreshTasksBtn" type="button" class="mini-ghost-button">刷新</button>
+          </summary>
+          <div id="taskCenterBody" class="dashboard-card-body"></div>
+        </details>
+
+        <details class="dashboard-card" open>
+          <summary>
+            <span>报告中心</span>
+            <button id="refreshReportsBtn" type="button" class="mini-ghost-button">刷新</button>
+          </summary>
+          <div id="reportCenterBody" class="dashboard-card-body"></div>
+        </details>
+      </div>
+    </section>
 
     <main class="chat-main">
       <div id="chatMessages" class="chat-container"></div>
@@ -88,7 +146,7 @@
           rows="1"
         ></textarea>
         <button id="sendButton" class="send-btn" type="button">发送</button>
-        <input id="fileInput" type="file" accept="*/*" style="display: none" />
+        <input id="fileInput" type="file" accept="*/*" multiple style="display: none" />
       </div>
       <p id="chatStatus" class="chat-status">正在初始化界面...</p>
     </footer>
@@ -119,15 +177,32 @@
     <aside class="workspace-panel-drawer" role="dialog" aria-modal="true" aria-labelledby="workspacePanelTitle">
       <div class="workspace-panel-header">
         <div>
-          <p class="brand-small brand-small-panel">Workspace</p>
-          <h2 id="workspacePanelTitle">当前会话工作区</h2>
+          <p class="brand-small brand-small-panel">Workspace Files</p>
+          <h2 id="workspacePanelTitle">工作区文件</h2>
         </div>
         <button id="closeWorkspacePanelBtn" type="button" class="mini-ghost-button">关闭</button>
       </div>
-      <div class="workspace-panel-toolbar">
-        <button id="refreshWorkspaceBtn" type="button" class="pill-button small">刷新工作区</button>
-      </div>
       <div id="workspacePanelBody" class="workspace-panel-body"></div>
+    </aside>
+  </div>
+
+  <div id="knowledgeBasePanel" class="knowledge-base-panel hidden" aria-hidden="true">
+    <div id="knowledgeBasePanelBackdrop" class="knowledge-base-panel-backdrop"></div>
+    <aside class="knowledge-base-panel-drawer" role="dialog" aria-modal="true" aria-labelledby="knowledgeBasePanelTitle">
+      <div class="knowledge-base-panel-header">
+        <div>
+          <p class="brand-small brand-small-panel">Knowledge Base</p>
+          <h2 id="knowledgeBasePanelTitle">知识库管理</h2>
+        </div>
+        <button id="closeKnowledgeBasePanelBtn" type="button" class="mini-ghost-button">关闭</button>
+      </div>
+      <div class="knowledge-base-panel-toolbar">
+        <button id="refreshKnowledgeBaseBtn" type="button" class="pill-button small">刷新</button>
+        <button id="createKnowledgeBaseBtn" type="button" class="pill-button small">新建知识库</button>
+        <button id="rebuildAllRagBtn" type="button" class="pill-button small ghost">全量重建 RAG</button>
+        <input id="knowledgeBaseFileInput" type="file" multiple style="display: none" />
+      </div>
+      <div id="knowledgeBasePanelBody" class="knowledge-base-panel-body"></div>
     </aside>
   </div>
 

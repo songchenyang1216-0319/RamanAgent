@@ -22,6 +22,11 @@ RamanAgent 正在向通用 Agent 形态演进，当前同时保留 Raman 光谱�
 - 历史记录
 - 报告生成
 - 光谱质量分析
+- 多会话与 ChatGPT 风格侧边栏
+- 会话文件 RAG、知识库 RAG、mixed RAG
+- 知识库前端 CRUD、上传、绑定、重建索引
+- OCR 可选 provider 与扫描件处理入口
+- 文件转换与 PDF fallback 策略
 
 ## 项目结构
 
@@ -106,6 +111,8 @@ OLLAMA_AVAILABLE_MODELS=qwen2.5:7b,qwen2.5:14b,qwen2.5-coder:7b,llama3.1:8b,deep
 
 如果某个平台的 API Key 没有配置，前端仍会显示该平台和其模型，但会标记为“未配置”，并阻止实际切换调用。
 
+RAG、Embedding、OCR、PDF 导出与生产部署配置见 [docs/production_readiness.md](./docs/production_readiness.md)。
+
 ## Windows 本地启动
 
 先启动后端，再打开前端页面。
@@ -139,8 +146,19 @@ http://127.0.0.1:8000/app/index.html
 - `POST /api/agent/chat`
 - `POST /api/agent/analyze-file`
 - `POST /api/files/upload`
+- `POST /api/files/{file_id}/ocr`
+- `POST /api/files/convert`
 - `GET /api/workspaces/{conversation_id}/files`
 - `GET /api/workspaces/{conversation_id}/context`
+- `GET /api/knowledge-bases`
+- `POST /api/knowledge-bases`
+- `GET /api/knowledge-bases/{knowledge_base_id}/index-status`
+- `POST /api/knowledge-bases/{knowledge_base_id}/rebuild-index`
+- `GET /api/conversations/{conversation_id}/knowledge-bases`
+- `POST /api/conversations/{conversation_id}/knowledge-bases`
+- `DELETE /api/conversations/{conversation_id}/knowledge-bases/{knowledge_base_id}`
+- `GET /api/rag/health`
+- `POST /api/rag/rebuild-all`
 - `GET /api/tasks/{task_id}`
 - `GET /api/conversations/{conversation_id}/tasks`
 - `GET /api/conversations/{conversation_id}/messages`
@@ -183,6 +201,7 @@ workspace/{user_id}/{conversation_id}/
 ```powershell
 python -B -c "import backend.main; print('ok')"
 node --check frontend/app.js
+.\scripts\smoke_check.ps1
 ```
 
 如果后续你确实需要完整测试，再单独执行项目里的测试脚本或完整测试命令。
@@ -244,11 +263,20 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8001 --reload
 
 - 不要提交 `.env`
 - 不要提交 `outputs/` 下的运行产物
+- 不要提交 `storage/` 下的知识库、向量库、文件索引
 - 不要公开真实样品数据
 - 不要把 API Key 写入代码、README 或测试
+
+演示流程见 [docs/demo_script.md](./docs/demo_script.md)。
 
 ## Docker
 
 当前仓库未新增 `Dockerfile` 和 `docker-compose.yml`。
 
 原因是项目已经可以通过 Windows 本地 Python + Uvicorn 直接启动，继续保持轻量化更利于维护；如果后续需要容器化部署，可以再单独补充，不影响现有代码结构。
+
+## MVP 第二阶段
+
+二阶段新增的用户系统、项目中心、报告导出、批量分析说明见：
+
+- [docs/mvp_phase_2.md](./docs/mvp_phase_2.md)

@@ -67,6 +67,152 @@ def _has_execution_marker(text: str) -> bool:
     )
 
 
+def _is_file_context_request(text: str) -> bool:
+    lowered = str(text or "").lower()
+    markers = (
+        "这个文件",
+        "刚才那个文件",
+        "上一个文件",
+        "当前文件",
+        "上传的文件",
+        "总结这个",
+        "分析这个",
+        "处理这个",
+        "转换这个",
+        "这个表格",
+        "这个文档",
+        "这个 pdf",
+        "这个pdf",
+        "这个 csv",
+        "这个csv",
+        "文件格式",
+        "是什么格式",
+        "this file",
+        "uploaded file",
+        "previous file",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _is_code_analysis_request(text: str) -> bool:
+    lowered = str(text or "").lower()
+    markers = (
+        "代码",
+        "脚本",
+        "函数",
+        "class",
+        "报错",
+        "bug",
+        "解释这段代码",
+        "解释这个代码",
+        "详细解释",
+        "看下这段代码",
+        "帮我看代码",
+        "分析代码",
+        "code",
+        "script",
+        "function",
+        "traceback",
+        "python",
+        ".py",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _is_document_transform_request(text: str) -> bool:
+    lowered = str(text or "").lower()
+    markers = (
+        "总结",
+        "摘要",
+        "概括",
+        "归纳",
+        "分析一下",
+        "帮我分析",
+        "提取重点",
+        "重点",
+        "要点",
+        "大纲",
+        "目录",
+        "结构",
+        "翻译",
+        "译成",
+        "润色",
+        "改写",
+        "整理",
+        "读一下",
+        "看一下",
+        "review",
+        "summarize",
+        "summary",
+        "outline",
+        "translate",
+        "polish",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _is_light_file_info_request(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(keyword in lowered for keyword in ("文件格式", "是什么格式", "多大", "文件名", "mime", "metadata", "元数据"))
+
+
+def _is_knowledge_base_request(text: str) -> bool:
+    lowered = str(text or "").lower()
+    markers = (
+        "知识库",
+        "资料库",
+        "知识库里",
+        "资料库里",
+        "项目资料",
+        "专业资料",
+        "团队资料",
+        "kb",
+        "knowledge base",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _is_rag_answer_request(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if _is_document_transform_request(text) and not any(keyword in lowered for keyword in ("查找", "检索", "引用", "出处", "回答", "有没有", "在哪里")):
+        return False
+    markers = (
+        "根据这个文件",
+        "基于这个文件",
+        "这个文件里",
+        "文件里",
+        "文档里",
+        "资料里",
+        "从这个文件",
+        "查找",
+        "检索",
+        "回答这个问题",
+        "问答",
+        "依据",
+        "引用",
+        "出处",
+        "有没有",
+        "是否提到",
+        "在哪里",
+        "哪一段",
+        "第几页",
+        "source",
+        "citation",
+        "find",
+        "search",
+        "where",
+        "does it mention",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _is_file_conversion_request(text: str) -> bool:
+    lowered = str(text or "").lower()
+    markers = ("转换", "转成", "转为", "导出为", "另存为", "convert to", "export as")
+    formats = ("pdf", "docx", "word", "md", "markdown", "html", "txt", "csv", "xlsx", "excel")
+    return any(marker in lowered for marker in markers) and any(fmt in lowered for fmt in formats)
+
+
 def _extract_history_id(message: str) -> str | None:
     """优先从文本中提取显式 history_id 或 task_id。"""
     patterns = [
@@ -260,6 +406,27 @@ class IntentRouter:
         message = str(normalized_message.message or "").strip()
         lowered = message.lower()
         file_type = str(normalized_message.file_type or "").strip().lower()
+        file_context_request = _is_file_context_request(message)
+        kb_request = _is_knowledge_base_request(message) or bool(normalized_message.knowledge_base_ids)
+
+        if kb_request and normalized_message.has_file:
+            return IntentResult(
+                intent="mixed_rag",
+                confidence=0.93,
+                reason="用户明确要求结合当前文件与知识库资料",
+                recommended_route="rag",
+                requires_file=True,
+                requires_llm=True,
+            )
+
+        if kb_request:
+            return IntentResult(
+                intent="knowledge_base_rag",
+                confidence=0.92,
+                reason="用户明确要求查询知识库资料",
+                recommended_route="rag",
+                requires_llm=True,
+            )
 
         if self._is_skill_management(message, lowered):
             return IntentResult(
@@ -282,11 +449,61 @@ class IntentRouter:
                 intent="web_search",
                 confidence=0.92,
                 reason="用户明确要求联网或查询最新信息",
-                recommended_route="fallback",
+                recommended_route="skill",
+                candidate_skills=["web-search"],
+                requires_tool=True,
+                requires_llm=True,
+            )
+
+        if any(keyword in lowered for keyword in ("生成报告", "markdown 报告", "markdown报告", "导出报告", "可下载报告")):
+            return IntentResult(
+                intent="report_generation",
+                confidence=0.93,
+                reason="用户明确要求生成报告产物",
+                recommended_route="skill",
+                candidate_skills=["report-generator"],
+                requires_llm=True,
+            )
+
+        if _is_file_conversion_request(message):
+            return IntentResult(
+                intent="file_conversion",
+                confidence=0.92,
+                reason="用户明确要求进行文件格式转换",
+                recommended_route="skill",
+                candidate_skills=["file-converter"],
+                requires_file=True,
                 requires_tool=True,
             )
 
         if normalized_message.has_file:
+            if file_type == "code" and (_is_code_analysis_request(message) or file_context_request):
+                return IntentResult(
+                    intent="code_analysis",
+                    confidence=0.97,
+                    reason="上传文件被识别为代码，且用户要求解释/分析代码",
+                    recommended_route="skill",
+                    candidate_skills=["code-assistant"],
+                    requires_file=True,
+                    requires_llm=True,
+                )
+            if _is_knowledge_question(message) and not file_context_request and message != "请分析这个文件":
+                return IntentResult(
+                    intent="general_chat",
+                    confidence=0.82,
+                    reason="虽然存在附件，但用户问题是普通知识问答，未要求处理文件",
+                    recommended_route="model",
+                    requires_llm=True,
+                )
+            if _is_light_file_info_request(message):
+                return IntentResult(
+                    intent="file_info",
+                    confidence=0.95,
+                    reason="用户只询问文件轻量元数据",
+                    recommended_route="tool",
+                    requires_file=True,
+                    requires_tool=True,
+                )
             if file_type == "raman":
                 return IntentResult(
                     intent="raman_analysis",
@@ -302,26 +519,65 @@ class IntentRouter:
                     confidence=0.97,
                     reason="上传文件被识别为 CSV/Excel 表格",
                     recommended_route="tool",
-                    candidate_skills=["data-analysis-skill"],
+                    candidate_skills=["table-analysis"],
                     requires_file=True,
                     requires_tool=True,
                 )
             if file_type == "document":
+                if _is_document_transform_request(message) or not _is_rag_answer_request(message):
+                    return IntentResult(
+                        intent="document_processing",
+                        confidence=0.97,
+                        reason="上传文件被识别为文档，用户要求摘要/分析/整理等文档处理动作",
+                        recommended_route="skill",
+                        requires_file=True,
+                        requires_llm=True,
+                    )
+                if _is_rag_answer_request(message):
+                    return IntentResult(
+                        intent="conversation_rag",
+                        confidence=0.94,
+                        reason="用户明确要求从当前会话文件中查找依据并回答具体问题",
+                        recommended_route="rag",
+                        requires_file=True,
+                        requires_llm=True,
+                    )
+            if file_type == "code":
                 return IntentResult(
                     intent="document_processing",
-                    confidence=0.96,
-                    reason="上传文件被识别为文本文档",
+                    confidence=0.72,
+                    reason="上传文件被识别为代码，但用户未明确说明目标，先按文本文件处理",
                     recommended_route="skill",
                     requires_file=True,
                     requires_llm=True,
                 )
             if file_type == "image":
                 return IntentResult(
-                    intent="document_processing",
+                    intent="image_understanding",
                     confidence=0.88,
                     reason="上传文件被识别为图片，优先交给 Skill 路由",
                     recommended_route="skill",
+                    candidate_skills=["image-understanding"],
                     requires_file=True,
+                )
+
+            if file_context_request and file_type in {"file", "code", ""}:
+                if _is_document_transform_request(message):
+                    return IntentResult(
+                        intent="document_processing",
+                        confidence=0.78,
+                        reason="用户要求处理当前文件，但文件类型不明确，先尝试文档处理器而不是检索",
+                        recommended_route="skill",
+                        requires_file=True,
+                        requires_llm=True,
+                    )
+                return IntentResult(
+                    intent="conversation_rag",
+                    confidence=0.86,
+                    reason="用户要求基于当前文件查找/问答，走会话文件 RAG",
+                    recommended_route="rag",
+                    requires_file=True,
+                    requires_llm=True,
                 )
 
         if any(keyword in lowered for keyword in ("raman", "sers", "光谱", "峰位", "基线校正", "sg 平滑", "sg平滑", "去噪", "浓度预测")):
@@ -340,8 +596,18 @@ class IntentRouter:
                 confidence=0.88,
                 reason="命中表格分析关键词",
                 recommended_route="tool",
-                candidate_skills=["data-analysis-skill"],
+                candidate_skills=["table-analysis"],
                 requires_tool=True,
+            )
+
+        if _is_code_analysis_request(message):
+            return IntentResult(
+                intent="code_analysis",
+                confidence=0.9,
+                reason="命中代码解释/分析关键词",
+                recommended_route="skill",
+                candidate_skills=["code-assistant"],
+                requires_llm=True,
             )
 
         if any(keyword in lowered for keyword in ("翻译", "总结", "润色", "原文对照", "讲稿", "论文", "阅读理解", "整理")):

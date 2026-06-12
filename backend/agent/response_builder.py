@@ -29,12 +29,19 @@ class ResponseBuilder:
         payload["category"] = payload.get("category") or intent.intent
         payload["skill_name"] = payload.get("skill_name") or response.skill_name
         payload["skill_mode"] = payload.get("skill_mode") or response.skill_mode
+        payload["skill_action"] = payload.get("skill_action") or payload.get("action_name") or response.action_name or plan.action_name
         payload["tool_name"] = payload.get("tool_name") or response.tool_name
         payload["provider_id"] = payload.get("provider_id") or response.model_provider or normalized.provider_id
         payload["model_id"] = payload.get("model_id") or response.model_name or normalized.model_id
         payload["used_skill"] = bool(payload.get("used_skill") or response.skill_used)
         payload["action_name"] = payload.get("action_name") or response.action_name
-        payload["artifacts"] = payload.get("artifacts") or []
+        payload["skill_used"] = bool(payload.get("skill_used") or payload.get("used_skill") or response.skill_used)
+        payload["artifacts"] = payload.get("artifacts") or (payload.get("data") or {}).get("artifacts") or []
+        data_payload = payload.get("data") or {}
+        if isinstance(data_payload, dict):
+            for key in ("rag_scope", "retrieval_mode", "rerank", "citations", "retrieved_chunks", "source_breakdown", "rag", "file_ids", "knowledge_base_ids"):
+                if key in data_payload and key not in payload:
+                    payload[key] = data_payload.get(key)
         if not payload.get("tool_info"):
             payload["tool_info"] = (
                 (raw_result or {}).get("tool_info")

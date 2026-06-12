@@ -55,6 +55,28 @@ class UserMemoryManager:
         write_json(self._path(user_id), merged)
         return merged
 
+    def replace_user_memory(self, user_id: str | None, memory: dict[str, Any]) -> dict[str, Any]:
+        payload = self._deep_merge(self._default_memory(user_id), dict(memory or {}))
+        payload["user_id"] = self._user_id(user_id)
+        payload["updated_at"] = now_iso()
+        write_json(self._path(user_id), payload)
+        return payload
+
+    def clear_user_memory(self, user_id: str | None) -> dict[str, Any]:
+        payload = self._default_memory(user_id)
+        write_json(self._path(user_id), payload)
+        return payload
+
+    def remember_note(self, user_id: str | None, note: str) -> dict[str, Any]:
+        clean_note = str(note or "").strip()
+        memory = self.get_user_memory(user_id)
+        profile = dict(memory.get("profile") or {})
+        notes = [str(item) for item in profile.get("notes", []) if str(item).strip()]
+        if clean_note and clean_note not in notes:
+            notes.append(clean_note)
+        profile["notes"] = notes[-50:]
+        return self.update_user_memory(user_id, {"profile": profile})
+
     def get_preferred_model(self, user_id: str | None) -> str | None:
         value = self.get_user_memory(user_id).get("preferred_model")
         return str(value) if value else None

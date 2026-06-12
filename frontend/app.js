@@ -1,26 +1,55 @@
 import {
-  clearAgentSession,
+  activateFile,
+  archiveProject,
+  attachProjectFile,
+  batchAnalyze,
+  clearAuthToken,
+  createProject,
   checkCurrentModel,
+  deleteFile as requestDeleteFile,
+  deleteReport as requestDeleteReport,
+  downloadBatchCsv,
+  downloadFileById,
+  downloadReport,
+  exportReport,
+  getAuthMe,
   getCurrentRamanModel,
   getConversationMessages,
-  getConversationTasks,
+  getFiles,
   getCurrentLlmModel,
   getModelProviders,
+  getProjects,
+  getReports,
+  getTaskLogs,
+  getTaskResult,
   getProviderModels,
-  getTaskTrace,
-  getAgentSession,
-  getWorkspaceContext,
-  getWorkspaceFiles,
+  getReport,
+  getSkillLogs,
+  getTasks,
+  getBatchSummary,
+  previewFile,
+  getProjectFiles,
+  getProjectReports,
+  getProjectTasks,
+  loginUser,
   loadSkills as fetchSkills,
   deleteSkill as requestDeleteSkill,
+  logoutUser,
   sendAgentChat,
+  setAuthToken,
   setActionEnabled as requestSetActionEnabled,
   setSkillEnabled as requestSetSkillEnabled,
   switchLlmModel,
   refreshLlmModels,
   toAssetUrl,
+  registerUser,
+  runFileOcr,
+  uploadWorkspaceFile,
   uploadSkillZip as requestUploadSkillZip,
 } from "./js/api.js";
+import { initConversationSidebar } from "./js/sidebar.js";
+import { renderArtifacts } from "./js/artifact-renderer.js";
+import { initKnowledgeBasePanel } from "./js/knowledge-base-panel.js";
 
 const STORAGE_KEYS = {
   sessionId: "multiskill-agent.sessionId",
@@ -35,19 +64,31 @@ const state = {
   sessionId: loadSessionId(),
   currentModel: null,
   llmModelsPayload: { current: null, providers: [], selectedProviderId: "", models: [] },
-  workspacePayload: { files: null, context: null, tasks: null, messages: null },
+  workspacePayload: { files: null, context: null, tasks: null, messages: null, knowledgeBases: null, conversationKnowledgeBases: null, ragStatus: null },
   workspaceOpen: false,
   userId: "default_user",
   selectedFile: null,
+  selectedFiles: [],
   skillsPayload: null,
+  skillLogsPayload: { logs: [] },
   expandedSkillNames: new Set(),
   chatBusy: false,
   typingNode: null,
   initialized: false,
   modelListOpen: false,
-  refreshingDashboard: false,
   uploadingSkill: false,
   toastTimer: null,
+  authToken: "",
+  currentUser: null,
+  authBusy: false,
+  projectsPayload: { projects: [] },
+  reportsPayload: { reports: [] },
+  dashboardFilesPayload: { files: [] },
+  dashboardTasksPayload: { tasks: [] },
+  selectedProjectId: "",
+  selectedBatchFileIds: new Set(),
+  conversationSidebar: null,
+  knowledgeBasePanel: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -340,6 +381,10 @@ function persistSessionId(sessionId) {
   if (target) {
     target.textContent = state.sessionId || "未创建";
   }
+  const sidebarUser = $("sidebarUserLabel");
+  if (sidebarUser) {
+    sidebarUser.textContent = state.currentUser?.username || state.userId || "default_user";
+  }
 }
 
 function setChatStatus(text) {
@@ -393,7 +438,7 @@ function formatResponseError(response = {}) {
   const suggestion = response.suggestion || "";
   const errorCode = response.error_code ? `（${response.error_code}）` : "";
   if (response.error_code === "REQUEST_TIMEOUT" || String(errorMessage).includes("请求超时")) {
-    return `${message}${errorCode}：${errorMessage} 可以稍后查看最近记录或刷新工作区。`;
+    return `${message}${errorCode}：${errorMessage} 可以稍后在左侧聊天记录中重新打开会话，或到工作区文件查看上传文件。`;
   }
   return `${message}${errorCode}：${errorMessage}${suggestion ? ` 建议：${suggestion}` : ""}`;
 }
@@ -413,7 +458,6 @@ function setBusy(isBusy, hint = "正在处理中...") {
   const sendButton = $("sendButton");
   const fileButton = $("fileButton");
   const messageInput = $("messageInput");
-  const chatDebug = $("chatDebug");
   if (sendButton) {
     sendButton.disabled = isBusy;
   }
@@ -422,9 +466,6 @@ function setBusy(isBusy, hint = "正在处理中...") {
   }
   if (messageInput) {
     messageInput.disabled = isBusy;
-  }
-  if (chatDebug) {
-    chatDebug.disabled = isBusy;
   }
   setChatStatus(isBusy ? hint : state.sessionId ? `当前会话：${state.sessionId}` : "可以直接提问，或上传任意文件后发送。");
 }
@@ -687,6 +728,46 @@ function renderWebSearchSources(payload = {}) {
   `;
 }
 
+function renderRagSources(payload = {}) {
+  const citations = Array.isArray(payload.citations)
+    ? payload.citations
+    : (Array.isArray(payload.data?.citations) ? payload.data.citations : []);
+  if (payload.route !== "rag" && !citations.length) {
+    return "";
+  }
+  const scopeLabel = {
+    conversation: "会话文件 RAG",
+    knowledge_base: "知识库 RAG",
+    mixed: "混合 RAG",
+  }[payload.rag_scope || payload.data?.rag_scope] || "RAG";
+  const retrievalMode = payload.retrieval_mode || payload.data?.retrieval_mode || "unknown";
+  const rerank = payload.rerank || payload.data?.rerank || payload.rag?.rerank || payload.data?.rag?.rerank || {};
+  const rerankLabel = rerank.provider
+    ? ` · rerank:${rerank.applied ? "on" : "off"}/${rerank.provider}`
+    : "";
+  const items = citations.slice(0, 6).map((item, index) => {
+    const title = item.knowledge_base_name
+      ? `${item.knowledge_base_name} / ${item.filename || "资料"}`
+      : (item.filename || item.file_id || item.chunk_id || "来源");
+    const location = [item.page ? `页 ${item.page}` : "", item.sheet ? `Sheet ${item.sheet}` : "", item.section || ""]
+      .filter(Boolean)
+      .join(" · ");
+    return `
+      <li>
+        <strong>[${index + 1}] ${escapeHtml(title)}</strong>
+        ${location ? `<span>${escapeHtml(location)}</span>` : ""}
+        ${item.preview ? `<small>${escapeHtml(item.preview)}</small>` : ""}
+      </li>
+    `;
+  }).join("");
+  return `
+    <details class="rag-sources" open>
+      <summary>${escapeHtml(scopeLabel)} · ${escapeHtml(retrievalMode)}${escapeHtml(rerankLabel)} · ${citations.length} 个引用</summary>
+      ${items ? `<ol>${items}</ol>` : "<p>没有返回可展示的引用片段。</p>"}
+    </details>
+  `;
+}
+
 function isImageFileLike(fileOrName) {
   const name = typeof fileOrName === "string" ? fileOrName : fileOrName?.name || "";
   return /\.(png|jpg|jpeg|webp|bmp|tif|tiff)$/i.test(String(name || ""));
@@ -749,54 +830,10 @@ function renderWelcomeMessage() {
       "<p>欢迎使用多功能 Agent 工作台。</p>",
       "<p>你可以直接提问，也可以点击左下角的 <strong>+</strong> 上传任意文件，然后继续发送处理请求。</p>",
       "<p>当前支持通过 Skills 扩展能力，其中 Raman 光谱处理是一个独立 Skill。</p>",
-      "<p>常见用法：<span class=\"inline-chip\">最近记录</span> <span class=\"inline-chip\">模型列表</span> <span class=\"inline-chip\">Skills 管理</span></p>",
+      "<p>常见用法：<span class=\"inline-chip\">模型列表</span> <span class=\"inline-chip\">工作区文件</span> <span class=\"inline-chip\">Skills 管理</span></p>",
     ].join(""),
     "text",
     state.sessionId ? `已恢复 ${state.sessionId}` : "新会话",
-  );
-}
-
-function truncateText(value, limit = 240) {
-  const text = String(value ?? "").trim();
-  if (text.length <= limit) {
-    return text;
-  }
-  return `${text.slice(0, Math.max(0, limit - 12))}……[已截断]`;
-}
-
-function formatCompactJson(value, limit = 1200) {
-  if (value === null || value === undefined || value === "") {
-    return "";
-  }
-  let text = "";
-  try {
-    text = JSON.stringify(value, null, 2);
-  } catch {
-    text = String(value);
-  }
-  return truncateText(text, limit);
-}
-
-function renderSessionMemorySummary(payload) {
-  const summary = truncateText(payload?.summary || "", 220) || "暂无摘要";
-  const lastAnalysis = payload?.last_analysis ? formatCompactJson(payload.last_analysis, 600) : "暂无最近分析";
-  const taskState = payload?.task_state_view ? formatCompactJson(payload.task_state_view, 700) : formatCompactJson(payload.task_state, 700);
-  appendMessage(
-    "system",
-    `
-      <div class="memory-summary-card">
-        <p><strong>会话 ID：</strong>${escapeHtml(payload?.session_id || state.sessionId || "未创建")}</p>
-        <p><strong>摘要：</strong>${escapeHtml(summary)}</p>
-        <p><strong>消息数：</strong>${escapeHtml(String(payload?.message_count ?? 0))}</p>
-        <details>
-          <summary>查看简要记忆</summary>
-          <div class="analysis-detail-json">${escapeHtml(lastAnalysis)}</div>
-          <div class="analysis-detail-json">${escapeHtml(taskState)}</div>
-        </details>
-      </div>
-    `,
-    "text",
-    buildNowText(),
   );
 }
 
@@ -809,61 +846,57 @@ function clearChatWindow() {
   renderWelcomeMessage();
 }
 
-async function handleNewSession() {
-  persistSessionId("");
+function clearForNewConversation() {
   state.selectedFile = null;
+  state.selectedFiles = [];
   const fileInput = $("fileInput");
   if (fileInput) {
     fileInput.value = "";
   }
-  renderSelectedFileChip(null);
+  renderSelectedFileChip([]);
+  clearChatWindow();
+  setChatStatus("已创建新聊天，可以直接提问或上传文件。");
+}
+
+async function renderConversationMessages(conversationId) {
+  if (!conversationId) {
+    clearForNewConversation();
+    return;
+  }
+  const response = await getConversationMessages(conversationId, state.userId, 200);
+  if (!response.success) {
+    showToast(response.error_message || "加载聊天消息失败", "error");
+    return;
+  }
+  const container = $("chatMessages");
+  if (container) {
+    container.innerHTML = "";
+  }
+  removeTypingMessage();
+  const messages = response.messages || [];
+  if (!messages.length) {
+    renderWelcomeMessage();
+    setChatStatus(`当前会话：${conversationId}`);
+    return;
+  }
+  messages.forEach((message) => {
+    const role = message.role === "assistant" ? "assistant" : message.role === "system" ? "system" : "user";
+    appendMessage(role, `<div class="markdown-body">${renderMarkdown(message.content || "")}</div>`, "text", message.created_at || buildNowText());
+  });
+  setChatStatus(`已恢复会话：${conversationId}`);
+}
+
+async function handleNewSession() {
+  persistSessionId("");
+  state.selectedFile = null;
+  state.selectedFiles = [];
+  const fileInput = $("fileInput");
+  if (fileInput) {
+    fileInput.value = "";
+  }
+  renderSelectedFileChip([]);
   clearChatWindow();
   setChatStatus("已切换为新会话，下一次发送时后端会自动创建新的 session。");
-}
-
-async function handleClearSessionMemory() {
-  const sessionId = state.sessionId;
-  if (!sessionId) {
-    window.alert("当前还没有可清空的 session，请先发送一次消息或新建会话。");
-    return;
-  }
-  try {
-    const response = await clearAgentSession(sessionId);
-    if (!response.success) {
-      throw new Error(response.error_message || "清空记忆失败");
-    }
-    state.selectedFile = null;
-    const fileInput = $("fileInput");
-    if (fileInput) {
-      fileInput.value = "";
-    }
-    renderSelectedFileChip(null);
-    clearChatWindow();
-    setChatStatus(`当前会话记忆已清空：${sessionId}`);
-    window.alert(response.message || "当前会话记忆已清空。");
-  } catch (error) {
-    console.error("清空会话记忆失败：", error);
-    window.alert(`清空会话记忆失败：${error.message || "未知错误"}`);
-  }
-}
-
-async function handleInspectSession() {
-  const sessionId = state.sessionId;
-  if (!sessionId) {
-    window.alert("当前还没有 session，请先发送一次消息。");
-    return;
-  }
-  try {
-    const response = await getAgentSession(sessionId);
-    if (!response.success) {
-      throw new Error(response.error_message || "读取记忆失败");
-    }
-    renderSessionMemorySummary(response);
-    setChatStatus(`已查看当前会话记忆：${sessionId}`);
-  } catch (error) {
-    console.error("查看会话记忆失败：", error);
-    window.alert(`查看会话记忆失败：${error.message || "未知错误"}`);
-  }
 }
 
 function getSkillIcon(category, source) {
@@ -907,17 +940,141 @@ function renderSkillsButtonError(error) {
 
 function renderSkillToggleButton(skill) {
   const canToggle = Boolean(skill.available) && skill.source !== "uploaded";
-  const nextEnabled = !skill.enabled;
   return `
-    <button
-      type="button"
-      class="skill-toggle-button"
-      data-toggle-skill-enabled="${escapeHtml(skill.name || "")}"
-      data-next-enabled="${String(nextEnabled)}"
-      ${canToggle ? "" : "disabled"}
-    >
-      ${skill.enabled ? "禁用" : "启用"}
-    </button>
+    <label class="skill-switch ${canToggle ? "" : "disabled"}">
+      <input
+        type="checkbox"
+        data-toggle-skill-enabled="${escapeHtml(skill.name || "")}"
+        ${skill.enabled ? "checked" : ""}
+        ${canToggle ? "" : "disabled"}
+      />
+      <span class="skill-switch-slider"></span>
+      <span class="skill-switch-text">${skill.enabled ? "已启用" : "已禁用"}</span>
+    </label>
+  `;
+}
+
+function renderSkillLogsSection(logs = []) {
+  if (!Array.isArray(logs) || !logs.length) {
+    return `
+      <section class="workspace-section">
+        <h3>Skill 执行日志</h3>
+        <div class="workspace-empty">当前范围内还没有 Skill 执行日志。</div>
+      </section>
+    `;
+  }
+  return `
+    <section class="workspace-section">
+      <h3>Skill 执行日志</h3>
+      <div class="workspace-task-list">
+        ${logs.map((log) => `
+          <article class="workspace-task-card ${log.status === "failed" ? "failed" : ""}">
+            <div class="workspace-task-head">
+              <strong>${escapeHtml(log.skill_name || "Skill")}</strong>
+              <span>${escapeHtml(log.status || "unknown")}</span>
+            </div>
+            <p>能力：${escapeHtml(log.capability || log.ability_name || "default")}</p>
+            <p>输入摘要：${escapeHtml(log.input_summary || "无")}</p>
+            <p>开始时间：${escapeHtml(log.started_at || "未记录")}</p>
+            <p>结束时间：${escapeHtml(log.ended_at || log.finished_at || "未记录")}</p>
+            <p>耗时：${escapeHtml(formatDurationMs(log.duration_ms) || "未记录")}</p>
+            ${log.error_message ? `<p class="error-message">错误原因：${escapeHtml(log.error_message)}</p>` : ""}
+          </article>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderFilePreviewSnippet(file) {
+  const preview = file.preview || {};
+  if (!preview.success) {
+    return "";
+  }
+  if (preview.preview_type === "image") {
+    const assetUrl = toAssetUrl(preview.preview_url);
+    return assetUrl ? `<img class="workspace-inline-preview" src="${escapeHtml(assetUrl)}" alt="${escapeHtml(file.filename || "preview")}" />` : "";
+  }
+  if (preview.content) {
+    return `<pre class="workspace-preview-text">${escapeHtml(preview.content)}</pre>`;
+  }
+  return "";
+}
+
+async function ensureFilePreview(fileId) {
+  if (!fileId) {
+    return null;
+  }
+  const existing = (state.workspacePayload.filePreviewMap || {})[fileId];
+  if (existing) {
+    return existing;
+  }
+  const response = await previewFile(fileId);
+  state.workspacePayload.filePreviewMap = state.workspacePayload.filePreviewMap || {};
+  state.workspacePayload.filePreviewMap[fileId] = response;
+  return response;
+}
+
+async function handleFileAction(action, fileId) {
+  if (!fileId) {
+    return;
+  }
+  try {
+    if (action === "delete") {
+      const response = await requestDeleteFile(fileId);
+      if (!response.success) {
+        throw new Error(response.error_message || "删除文件失败");
+      }
+      showToast(response.message || "文件已删除", "success");
+      await refreshWorkspacePanel();
+      return;
+    }
+    if (action === "preview") {
+      await ensureFilePreview(fileId);
+      renderWorkspacePanel();
+      return;
+    }
+    if (action === "analyze") {
+      if (!state.sessionId) {
+        throw new Error("当前还没有会话，无法指定分析文件。");
+      }
+      const response = await activateFile(fileId, state.sessionId, state.userId);
+      if (!response.success) {
+        throw new Error(response.error_message || "切换当前分析文件失败");
+      }
+      showToast("已切换到该文件，开始继续分析", "info");
+      sendChatMessage("继续分析这个文件");
+    }
+    if (action === "ocr") {
+      if (!state.sessionId) {
+        throw new Error("当前还没有会话，无法写入 OCR 结果。");
+      }
+      showToast("正在执行 OCR，这可能需要一会儿", "info");
+      const response = await runFileOcr(fileId, { conversationId: state.sessionId, userId: state.userId });
+      if (!response.success) {
+        throw new Error(response.suggestion ? `${response.error_message || "OCR 失败"}；建议：${response.suggestion}` : response.error_message || "OCR 失败");
+      }
+      showToast(response.message || "OCR 完成", "success");
+      await refreshWorkspacePanel();
+    }
+  } catch (error) {
+    console.error("文件操作失败：", error);
+    showToast(`文件操作失败：${error.message || "未知错误"}`, "error");
+  }
+}
+
+function renderFileActionButtons(item) {
+  const downloadUrl = toAssetUrl(item.download_url || `/api/files/${encodeURIComponent(item.file_id || "")}/download`);
+  const type = String(item.file_type || item.mime_type || item.filename || "").toLowerCase();
+  const canOcr = type.includes("pdf") || /\.(png|jpg|jpeg|webp|bmp|gif|tif|tiff)$/i.test(String(item.filename || item.original_filename || ""));
+  return `
+    <div class="workspace-file-actions">
+      <button type="button" class="skill-toggle-button small" data-preview-file="${escapeHtml(item.file_id || "")}">预览</button>
+      <a class="skill-toggle-button small link-button" href="${escapeHtml(downloadUrl)}" target="_blank" rel="noreferrer">下载</a>
+      <button type="button" class="skill-toggle-button small" data-analyze-file="${escapeHtml(item.file_id || "")}">分析</button>
+      ${canOcr ? `<button type="button" class="skill-toggle-button small" data-ocr-file="${escapeHtml(item.file_id || "")}">OCR</button>` : ""}
+      <button type="button" class="skill-toggle-button small danger" data-delete-file="${escapeHtml(item.file_id || "")}">删除</button>
+    </div>
   `;
 }
 
@@ -1060,16 +1217,17 @@ function renderSkillsPanel(payload) {
   const contentHtml = payload.skills.length
     ? payload.skills.map((skill) => renderSkillCard(skill)).join("")
     : `<div class="skills-empty">当前没有可展示的大 Skill。</div>`;
+  const skillLogsHtml = renderSkillLogsSection(state.skillLogsPayload.logs || []);
   body.innerHTML = payload.error
-    ? `<div class="skills-empty">${escapeHtml(payload.error)}</div>${contentHtml}`
-    : contentHtml;
+    ? `<div class="skills-empty">${escapeHtml(payload.error)}</div>${contentHtml}${skillLogsHtml}`
+    : `${contentHtml}${skillLogsHtml}`;
 
   body.querySelectorAll("[data-toggle-skill]").forEach((button) => {
     button.addEventListener("click", () => toggleSkillActions(button.dataset.toggleSkill || ""));
   });
   body.querySelectorAll("[data-toggle-skill-enabled]").forEach((button) => {
-    button.addEventListener("click", () => {
-      toggleSkillEnabled(button.dataset.toggleSkillEnabled || "", button.dataset.nextEnabled === "true");
+    button.addEventListener("change", () => {
+      toggleSkillEnabled(button.dataset.toggleSkillEnabled || "", button.checked);
     });
   });
   body.querySelectorAll("[data-delete-skill]").forEach((button) => {
@@ -1195,14 +1353,20 @@ async function deleteSkillItem(skillName) {
   }
 }
 
-function renderSelectedFileChip(file) {
+function renderSelectedFileChip(fileOrFiles) {
   const chip = $("selectedFileChip");
   if (!chip) {
     console.warn("找不到 selectedFileChip，跳过文件 chip 渲染");
     return;
   }
 
-  if (!file) {
+  const files = Array.isArray(fileOrFiles)
+    ? fileOrFiles
+    : fileOrFiles
+      ? [fileOrFiles]
+      : [];
+
+  if (!files.length) {
     chip.classList.add("hidden");
     chip.innerHTML = "";
     return;
@@ -1210,32 +1374,42 @@ function renderSelectedFileChip(file) {
 
   chip.classList.remove("hidden");
   chip.innerHTML = `
-    <span class="file-chip-name">已选择：${escapeHtml(file.name)}</span>
-    <button id="removeSelectedFileButton" type="button" class="file-chip-remove" aria-label="移除已选文件">×</button>
+    ${files
+      .map(
+        (file, index) => `
+          <span class="file-chip-name" title="${escapeHtml(file.name)}">
+            ${escapeHtml(file.name)}
+            <button type="button" class="file-chip-remove" data-remove-file-index="${index}" aria-label="移除已选文件">×</button>
+          </span>
+        `,
+      )
+      .join("")}
   `;
 
-  const removeBtn = $("removeSelectedFileButton");
-  if (removeBtn) {
-    removeBtn.addEventListener("click", () => {
-      state.selectedFile = null;
+  chip.querySelectorAll("[data-remove-file-index]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const index = Number(button.getAttribute("data-remove-file-index"));
+      state.selectedFiles = state.selectedFiles.filter((_, currentIndex) => currentIndex !== index);
+      state.selectedFile = state.selectedFiles[0] || null;
       const fileInput = $("fileInput");
-      if (fileInput) {
+      if (fileInput && !state.selectedFiles.length) {
         fileInput.value = "";
       }
-      renderSelectedFileChip(null);
+      renderSelectedFileChip(state.selectedFiles);
     });
-  }
+  });
 }
 
 function handleFileSelect(event) {
-  const file = event.target.files && event.target.files[0];
-  if (!file) {
+  const files = Array.from(event.target.files || []);
+  if (!files.length) {
     return;
   }
 
-  state.selectedFile = file;
-  debugLog("已选择文件：", file.name);
-  renderSelectedFileChip(file);
+  state.selectedFiles = files;
+  state.selectedFile = files[0] || null;
+  debugLog("已选择文件：", files.map((file) => file.name).join(", "));
+  renderSelectedFileChip(files);
 }
 
 async function handleSkillZipSelect(event) {
@@ -1720,6 +1894,8 @@ function renderGenericAnalysisResult(message) {
 }
 
 function renderAssistantResponse(payload) {
+  const artifactsHtml = renderArtifacts(payload?.artifacts || []);
+  const ragSourcesHtml = renderRagSources(payload || {});
   const messages = Array.isArray(payload?.messages) && payload.messages.length
     ? payload.messages
     : [
@@ -1741,33 +1917,33 @@ function renderAssistantResponse(payload) {
       const kind = message.result_kind || message.analysis?.result_kind || "generic";
       const traceBanner = buildAssistantSourceBadge(message, payload);
       if (kind === "preprocessing") {
-        appendMessage("assistant", `${modelBadge}${traceBanner}${renderPreprocessingResult(message)}`, "analysis");
+        appendMessage("assistant", `${modelBadge}${traceBanner}${renderPreprocessingResult(message)}${artifactsHtml}`, "analysis");
         return;
       }
       if (kind === "prediction") {
-        appendMessage("assistant", `${modelBadge}${traceBanner}${renderPredictionResult(message)}`, "analysis");
+        appendMessage("assistant", `${modelBadge}${traceBanner}${renderPredictionResult(message)}${artifactsHtml}`, "analysis");
         return;
       }
       if (kind === "model_status") {
-        appendMessage("assistant", `${modelBadge}${traceBanner}${renderModelStatusResult(message)}`, "analysis");
+        appendMessage("assistant", `${modelBadge}${traceBanner}${renderModelStatusResult(message)}${artifactsHtml}`, "analysis");
         return;
       }
       if (kind === "report") {
-        appendMessage("assistant", `${modelBadge}${traceBanner}${renderReportResult(message)}`, "analysis");
+        appendMessage("assistant", `${modelBadge}${traceBanner}${renderReportResult(message)}${artifactsHtml}`, "analysis");
         return;
       }
       if (kind === "uploaded_skill") {
-        appendMessage("assistant", `${modelBadge}${traceBanner}${renderUploadedSkillResult(message)}`, "analysis");
+        appendMessage("assistant", `${modelBadge}${traceBanner}${renderUploadedSkillResult(message)}${artifactsHtml}`, "analysis");
         return;
       }
-      appendMessage("assistant", `${modelBadge}${traceBanner}${renderGenericAnalysisResult(message)}`, "analysis");
+      appendMessage("assistant", `${modelBadge}${traceBanner}${renderGenericAnalysisResult(message)}${artifactsHtml}`, "analysis");
       return;
     }
     if (message.type === "error") {
       appendMessage("assistant", `${modelBadge}${buildAssistantSourceBadge(message, payload)}<p class="error-message">${renderInlineMarkdown(message.content || "分析失败。")}</p>`, "error");
       return;
     }
-    appendMessage("assistant", `${modelBadge}${buildAssistantSourceBadge(message, payload)}${renderMarkdown(message.content || "")}${renderWebSearchSources(payload)}`, "text");
+    appendMessage("assistant", `${modelBadge}${buildAssistantSourceBadge(message, payload)}${renderMarkdown(message.content || "")}${renderWebSearchSources(payload)}${ragSourcesHtml}${artifactsHtml}`, "text");
   });
 }
 
@@ -1872,11 +2048,15 @@ function renderWorkspacePanel() {
   if (!body) {
     return;
   }
-  const files = state.workspacePayload.files || {};
-  const context = state.workspacePayload.context || {};
-  const tasks = Array.isArray(state.workspacePayload.tasks?.tasks) ? state.workspacePayload.tasks.tasks : [];
-  const taskTraces = state.workspacePayload.taskTraces || {};
-  const messages = Array.isArray(state.workspacePayload.messages?.messages) ? state.workspacePayload.messages.messages : [];
+  const previewMap = state.workspacePayload.filePreviewMap || {};
+  const files = (Array.isArray(state.workspacePayload.files?.files) ? state.workspacePayload.files.files : []).map((item) => ({
+    ...item,
+    preview: previewMap[item.file_id] || null,
+  }));
+  const uploadedFiles = files.filter((item) => {
+    const source = String(item.source || item.file_source || item.kind || "upload").toLowerCase();
+    return !source || source === "upload" || source === "uploaded" || source === "workspace";
+  });
   const renderFileList = (items = [], emptyText) => {
     if (!items.length) {
       return `<div class="workspace-empty">${escapeHtml(emptyText)}</div>`;
@@ -1887,62 +2067,11 @@ function renderWorkspacePanel() {
           .map(
             (item) => `
               <div class="workspace-file-item">
-                <strong>${escapeHtml(item.original_name || item.filename || "未命名文件")}</strong>
-                <span>${escapeHtml(item.mime_type || "unknown")} · ${escapeHtml(String(item.size || 0))} bytes</span>
+                <strong>${escapeHtml(item.original_filename || item.original_name || item.filename || "未命名文件")}</strong>
+                <span>${escapeHtml(item.file_type || item.mime_type || "unknown")} · ${escapeHtml(String(item.size || 0))} bytes · ${escapeHtml(item.upload_time || "未知时间")}</span>
+                ${renderFileActionButtons(item)}
+                ${renderFilePreviewSnippet(item)}
               </div>
-            `,
-          )
-          .join("")}
-      </div>
-    `;
-  };
-  const renderTasks = () => {
-    if (!tasks.length) {
-      return `<div class="workspace-empty">当前会话还没有任务执行记录。</div>`;
-    }
-    return `
-      <div class="workspace-task-list">
-        ${tasks
-          .slice()
-          .reverse()
-          .map(
-            (task) => `
-              <article class="workspace-task-card ${task.status === "failed" ? "failed" : ""}">
-                <div class="workspace-task-head">
-                  <strong>${escapeHtml(task.intent || "unknown")}</strong>
-                  <span>${escapeHtml(task.status || "unknown")}</span>
-                </div>
-                ${task.selected_skill ? `<p>已选择 Skill：${escapeHtml(task.selected_skill)}</p>` : ""}
-                ${task.selected_ability ? `<p>已执行能力：${escapeHtml(task.selected_ability)}</p>` : ""}
-                ${
-                  Array.isArray(taskTraces[task.task_id]?.steps) && taskTraces[task.task_id].steps.length
-                    ? `<div class="workspace-step-list">${taskTraces[task.task_id].steps
-                        .map((step) => `<div><span>${escapeHtml(step.status || "")}</span><strong>${escapeHtml(step.name || "")}</strong></div>`)
-                        .join("")}</div>`
-                    : ""
-                }
-                ${
-                  Array.isArray(taskTraces[task.task_id]?.skill_runs) && taskTraces[task.task_id].skill_runs.length
-                    ? `<div class="workspace-skillrun-list">${taskTraces[task.task_id].skill_runs
-                        .map(
-                          (run) => `
-                            <div class="workspace-skillrun-card ${run.status === "failed" ? "failed" : ""}">
-                              <strong>${escapeHtml(run.skill_name || "Skill")}</strong>
-                              <span>${escapeHtml(run.ability_name || "default")} · ${escapeHtml(run.status || "")}</span>
-                              ${run.raw_result_summary ? `<p>${escapeHtml(run.raw_result_summary)}</p>` : ""}
-                            </div>
-                          `,
-                        )
-                        .join("")}</div>`
-                    : ""
-                }
-                ${
-                  Array.isArray(task.output_files) && task.output_files.length
-                    ? `<p>已生成结果：${task.output_files.map((item) => escapeHtml(item.filename || item.path || "output")).join("、")}</p>`
-                    : ""
-                }
-                ${task.error_message ? `<p class="error-message">失败原因：${escapeHtml(task.error_message)}</p><p>建议操作：检查输入文件、API Key 或 Skill 配置后重试。</p>` : ""}
-              </article>
             `,
           )
           .join("")}
@@ -1951,41 +2080,23 @@ function renderWorkspacePanel() {
   };
   body.innerHTML = `
     <section class="workspace-section">
-      <h3>上下文</h3>
-      <div class="workspace-context-card">
-        <p><strong>会话：</strong>${escapeHtml(state.sessionId || "未创建")}</p>
-        <p><strong>活跃文件：</strong>${escapeHtml(String((context.active_files || []).length || 0))}</p>
-        <details>
-          <summary>查看摘要</summary>
-          ${renderMarkdownWithCollapse(context.context_summary || "暂无上下文摘要。", { threshold: 600, label: "展开摘要" })}
-        </details>
-      </div>
-    </section>
-    <section class="workspace-section">
-      <h3>Uploads</h3>
-      ${renderFileList(files.uploads || [], "还没有上传文件。")}
-    </section>
-    <section class="workspace-section">
-      <h3>Outputs</h3>
-      ${renderFileList(files.outputs || [], "还没有输出文件。")}
-    </section>
-    <section class="workspace-section">
-      <h3>任务执行记录</h3>
-      ${renderTasks()}
-    </section>
-    <section class="workspace-section">
-      <h3>最近消息</h3>
-      ${
-        messages.length
-          ? `<div class="workspace-message-list">${messages
-              .slice()
-              .reverse()
-              .map((item) => `<div class="workspace-message-item"><span>${escapeHtml(item.role || "")}</span><p>${escapeHtml(item.content || "")}</p></div>`)
-              .join("")}</div>`
-          : `<div class="workspace-empty">暂无消息日志。</div>`
-      }
+      <h3>上传文件</h3>
+      ${renderFileList(uploadedFiles, "当前会话还没有上传文件。")}
     </section>
   `;
+
+  body.querySelectorAll("[data-preview-file]").forEach((button) => {
+    button.addEventListener("click", () => handleFileAction("preview", button.dataset.previewFile || ""));
+  });
+  body.querySelectorAll("[data-delete-file]").forEach((button) => {
+    button.addEventListener("click", () => handleFileAction("delete", button.dataset.deleteFile || ""));
+  });
+  body.querySelectorAll("[data-analyze-file]").forEach((button) => {
+    button.addEventListener("click", () => handleFileAction("analyze", button.dataset.analyzeFile || ""));
+  });
+  body.querySelectorAll("[data-ocr-file]").forEach((button) => {
+    button.addEventListener("click", () => handleFileAction("ocr", button.dataset.ocrFile || ""));
+  });
 }
 
 async function refreshWorkspacePanel() {
@@ -1993,21 +2104,11 @@ async function refreshWorkspacePanel() {
     renderWorkspacePanel();
     return;
   }
-  const [files, context, tasks, messages] = await Promise.all([
-    getWorkspaceFiles(state.sessionId, state.userId),
-    getWorkspaceContext(state.sessionId, state.userId),
-    getConversationTasks(state.sessionId, state.userId),
-    getConversationMessages(state.sessionId, state.userId, 20),
-  ]);
-  const taskItems = Array.isArray(tasks?.tasks) ? tasks.tasks : [];
-  const traceResults = await Promise.allSettled(taskItems.slice(-8).map((task) => getTaskTrace(task.task_id)));
-  const taskTraces = {};
-  traceResults.forEach((result) => {
-    if (result.status === "fulfilled" && result.value?.success && result.value.task?.task_id) {
-      taskTraces[result.value.task.task_id] = result.value;
-    }
-  });
-  state.workspacePayload = { files, context, tasks, messages, taskTraces };
+  const files = await getFiles({ userId: state.userId, workspaceId: state.sessionId });
+  state.workspacePayload = {
+    files,
+    filePreviewMap: state.workspacePayload.filePreviewMap || {},
+  };
   renderWorkspacePanel();
 }
 
@@ -2092,10 +2193,6 @@ function bindComposerEvents() {
 }
 
 function bindPageEvents() {
-  $("newSessionBtn")?.addEventListener("click", handleNewSession);
-  $("clearMemoryBtn")?.addEventListener("click", handleClearSessionMemory);
-  $("inspectMemoryBtn")?.addEventListener("click", handleInspectSession);
-
   $("skillsButton")?.addEventListener("click", openSkillsPanel);
   $("skillsManageBtn")?.addEventListener("click", openSkillsPanel);
   $("closeSkillsPanelBtn")?.addEventListener("click", closeSkillsPanel);
@@ -2106,10 +2203,6 @@ function bindPageEvents() {
   $("workspaceButton")?.addEventListener("click", openWorkspacePanel);
   $("closeWorkspacePanelBtn")?.addEventListener("click", closeWorkspacePanel);
   $("workspacePanelBackdrop")?.addEventListener("click", closeWorkspacePanel);
-  $("refreshWorkspaceBtn")?.addEventListener("click", async () => {
-    await refreshWorkspacePanel();
-    showToast("已刷新工作区", "info");
-  });
 
   $("modelListBtn")?.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -2131,9 +2224,6 @@ function bindPageEvents() {
     }
     showToast(response.message || "已刷新大模型列表", "info");
   });
-  $("recentExperimentBtn")?.addEventListener("click", () => sendChatMessage("最近记录"));
-  $("refreshDashboardBtn")?.addEventListener("click", refreshDashboard);
-
   document.addEventListener("click", (event) => {
     const wrap = document.querySelector(".model-menu-wrap");
     if (state.modelListOpen && wrap && !wrap.contains(event.target)) {
@@ -2145,6 +2235,7 @@ function bindPageEvents() {
     if (event.key === "Escape") {
       closeSkillsPanel();
       closeWorkspacePanel();
+      state.knowledgeBasePanel?.close();
       closeModelList();
     }
   });
@@ -2238,11 +2329,15 @@ async function loadLlmModelsSafely(preferredProviderId = "") {
 }
 
 async function loadSkills() {
-  const response = await fetchSkills();
+  const [response, logsResponse] = await Promise.all([
+    fetchSkills(),
+    getSkillLogs({ userId: state.userId, conversationId: state.sessionId || "", limit: 20 }),
+  ]);
   if (!response.success) {
     throw new Error(response.error_message || "加载 Skills 失败");
   }
   state.skillsPayload = response;
+  state.skillLogsPayload = logsResponse?.success ? logsResponse : { logs: [] };
   renderSkillsButton(response);
   renderSkillsPanel(response);
 }
@@ -2261,36 +2356,594 @@ async function loadSkillsSafely() {
   }
 }
 
-async function refreshDashboard() {
-  if (state.refreshingDashboard) {
+function setAuthUiVisible(isLoggedIn) {
+  $("phase2Panels")?.classList.toggle("hidden", !isLoggedIn);
+  ["workspaceButton", "skillsManageBtn", "skillsButton"].forEach((id) => {
+    $(id)?.classList.toggle("hidden", !isLoggedIn);
+  });
+  const userBar = $("currentUserBar");
+  if (userBar) {
+    userBar.textContent = isLoggedIn && state.currentUser
+      ? `当前用户：${state.currentUser.username} (${state.currentUser.role || "user"})`
+      : "当前用户：未登录";
+  }
+  const sidebarUser = $("sidebarUserLabel");
+  if (sidebarUser) {
+    sidebarUser.textContent = isLoggedIn && state.currentUser ? state.currentUser.username : state.userId || "default_user";
+  }
+}
+
+function renderAuthPanel() {
+  const body = $("authPanelBody");
+  if (!body) {
     return;
   }
-  state.refreshingDashboard = true;
-  const button = $("refreshDashboardBtn");
-  const originalText = button?.textContent || "刷新";
-  if (button) {
-    button.disabled = true;
-    button.textContent = "刷新中...";
+  const current = state.currentUser;
+  if (current) {
+    body.innerHTML = `
+      <div class="auth-card">
+        <h3>当前登录状态</h3>
+        <div class="entity-meta">
+          <div>用户名：${escapeHtml(current.username || "")}</div>
+          <div>角色：${escapeHtml(current.role || "user")}</div>
+          <div>用户 ID：${escapeHtml(current.user_id || "")}</div>
+        </div>
+        <div class="inline-actions" style="margin-top: 12px;">
+          <button id="logoutBtn" type="button" class="pill-button">退出登录</button>
+        </div>
+      </div>
+    `;
+    $("logoutBtn")?.addEventListener("click", handleLogout);
+    return;
   }
-  debugLog("开始刷新工作台信息");
-  const results = await Promise.allSettled([loadRamanStatusSafely(), loadLlmModelsSafely(), loadSkillsSafely()]);
-  if (state.workspaceOpen) {
-    await refreshWorkspacePanel();
+  body.innerHTML = `
+    <div class="auth-grid">
+      <div class="auth-card">
+        <h3>登录</h3>
+        <form id="loginForm">
+          <input class="form-input" name="username" placeholder="用户名" required />
+          <input class="form-input" name="password" type="password" placeholder="密码" required />
+          <button class="pill-button" type="submit">登录</button>
+        </form>
+      </div>
+      <div class="auth-card">
+        <h3>注册</h3>
+        <form id="registerForm">
+          <input class="form-input" name="username" placeholder="用户名" required />
+          <input class="form-input" name="password" type="password" placeholder="密码（至少 6 位）" required />
+          <button class="pill-button" type="submit">注册并登录</button>
+        </form>
+      </div>
+    </div>
+    <div class="panel-note">未登录时，项目中心、文件中心、任务中心、报告中心与 Skill 管理会隐藏。</div>
+  `;
+  $("loginForm")?.addEventListener("submit", handleLoginSubmit);
+  $("registerForm")?.addEventListener("submit", handleRegisterSubmit);
+}
+
+function getCurrentProject() {
+  const projects = Array.isArray(state.projectsPayload?.projects) ? state.projectsPayload.projects : [];
+  return projects.find((item) => item.project_id === state.selectedProjectId) || null;
+}
+
+function renderProjectPanel() {
+  const body = $("projectPanelBody");
+  if (!body) {
+    return;
   }
-  results.forEach((result, index) => {
-    if (result.status === "rejected") {
-      console.error(`刷新任务 ${index + 1} 失败：`, result.reason);
+  const projects = Array.isArray(state.projectsPayload?.projects) ? state.projectsPayload.projects : [];
+  const currentProject = getCurrentProject();
+  body.innerHTML = `
+    <div class="auth-card">
+      <h3>新建项目</h3>
+      <form id="createProjectForm">
+        <input class="form-input" name="name" placeholder="项目名称，例如：甲醇浓度检测实验" required />
+        <textarea class="form-textarea" name="description" placeholder="项目描述"></textarea>
+        <button class="pill-button" type="submit">创建项目</button>
+      </form>
+    </div>
+    ${
+      currentProject
+        ? `<div class="current-project-banner">当前项目：<strong>${escapeHtml(currentProject.name || "")}</strong><br />${escapeHtml(currentProject.description || "暂无描述")}</div>`
+        : `<div class="panel-note">当前未选择项目。上传文件和导出报告时可以不绑定项目，或先创建一个项目再继续。</div>`
+    }
+    <div class="entity-list">
+      ${
+        projects.length
+          ? projects.map((project) => `
+            <article class="entity-card">
+              <div class="entity-card-head">
+                <div>
+                  <h4>${escapeHtml(project.name || "")}</h4>
+                  <div class="entity-meta">${escapeHtml(project.description || "暂无描述")}</div>
+                </div>
+                <div class="entity-tags">
+                  <span class="entity-tag">文件 ${escapeHtml(String(project.file_count || 0))}</span>
+                  <span class="entity-tag">任务 ${escapeHtml(String(project.task_count || 0))}</span>
+                  <span class="entity-tag">报告 ${escapeHtml(String(project.report_count || 0))}</span>
+                </div>
+              </div>
+              <div class="inline-actions">
+                <button class="pill-button small" type="button" data-select-project="${escapeHtml(project.project_id || "")}">${project.project_id === state.selectedProjectId ? "已选中" : "设为当前项目"}</button>
+                <button class="pill-button small ghost" type="button" data-archive-project="${escapeHtml(project.project_id || "")}">归档</button>
+              </div>
+            </article>
+          `).join("")
+          : `<div class="panel-note">当前还没有项目。</div>`
+      }
+    </div>
+  `;
+  $("createProjectForm")?.addEventListener("submit", handleCreateProject);
+  body.querySelectorAll("[data-select-project]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.selectedProjectId = button.dataset.selectProject || "";
+      await loadPhase2Data();
+    });
+  });
+  body.querySelectorAll("[data-archive-project]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const projectId = button.dataset.archiveProject || "";
+      if (!projectId) {
+        return;
+      }
+      const response = await archiveProject(projectId);
+      if (!response.success) {
+        showToast(response.error_message || "归档项目失败", "error");
+        return;
+      }
+      if (state.selectedProjectId === projectId) {
+        state.selectedProjectId = "";
+      }
+      showToast("项目已归档", "success");
+      await loadPhase2Data();
+    });
+  });
+}
+
+function renderFileCenter() {
+  const body = $("fileCenterBody");
+  if (!body) {
+    return;
+  }
+  const files = Array.isArray(state.dashboardFilesPayload?.files) ? state.dashboardFilesPayload.files : [];
+  const currentProject = getCurrentProject();
+  body.innerHTML = `
+    <div class="auth-card">
+      <h3>上传到文件中心</h3>
+      <form id="fileCenterUploadForm">
+        <input id="dashboardFileInput" class="form-input" name="file" type="file" required />
+        <div class="panel-note">上传时会自动绑定到当前项目：${escapeHtml(currentProject?.name || "未绑定项目")}</div>
+        <button class="pill-button" type="submit">上传文件</button>
+      </form>
+    </div>
+    <div class="selection-row">
+      <label><input id="selectAllBatchFiles" type="checkbox" ${files.length && state.selectedBatchFileIds.size === files.length ? "checked" : ""} /> 全选当前列表</label>
+      <button id="runBatchAnalyzeBtn" class="pill-button" type="button">批量分析选中文件</button>
+      <span class="muted-text">已选 ${escapeHtml(String(state.selectedBatchFileIds.size))} 个文件</span>
+    </div>
+    <div class="entity-list">
+      ${
+        files.length
+          ? `<table class="simple-table">
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>文件名</th>
+                  <th>类型</th>
+                  <th>上传时间</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${files.map((file) => `
+                  <tr>
+                    <td><input type="checkbox" data-batch-file="${escapeHtml(file.file_id || "")}" ${state.selectedBatchFileIds.has(file.file_id) ? "checked" : ""} /></td>
+                    <td>${escapeHtml(file.original_filename || file.filename || "")}</td>
+                    <td>${escapeHtml(file.file_type || "")}</td>
+                    <td>${escapeHtml(file.upload_time || "")}</td>
+                    <td>
+                      <div class="inline-actions">
+                        <button class="pill-button small" type="button" data-preview-dashboard-file="${escapeHtml(file.file_id || "")}">预览</button>
+                        <button class="pill-button small" type="button" data-download-dashboard-file="${escapeHtml(file.file_id || "")}">下载</button>
+                        <button class="pill-button small" type="button" data-analyze-dashboard-file="${escapeHtml(file.file_id || "")}">分析</button>
+                        <button class="pill-button small ghost" type="button" data-export-dashboard-file="${escapeHtml(file.file_id || "")}" data-export-format="markdown">导出 MD</button>
+                        <button class="pill-button small ghost" type="button" data-export-dashboard-file="${escapeHtml(file.file_id || "")}" data-export-format="docx">导出 Word</button>
+                        <button class="pill-button small ghost" type="button" data-export-dashboard-file="${escapeHtml(file.file_id || "")}" data-export-format="pdf">导出 PDF</button>
+                        ${currentProject && file.project_id !== currentProject.project_id ? `<button class="pill-button small ghost" type="button" data-attach-dashboard-file="${escapeHtml(file.file_id || "")}">绑定当前项目</button>` : ""}
+                        <button class="pill-button small ghost" type="button" data-delete-dashboard-file="${escapeHtml(file.file_id || "")}">删除</button>
+                      </div>
+                    </td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>`
+          : `<div class="panel-note">当前没有文件。你可以先上传 Raman CSV，再做单文件或批量分析。</div>`
+      }
+    </div>
+  `;
+  $("fileCenterUploadForm")?.addEventListener("submit", handleDashboardUpload);
+  $("selectAllBatchFiles")?.addEventListener("change", (event) => {
+    const checked = Boolean(event.target?.checked);
+    state.selectedBatchFileIds = checked ? new Set(files.map((item) => item.file_id)) : new Set();
+    renderFileCenter();
+  });
+  $("runBatchAnalyzeBtn")?.addEventListener("click", handleBatchAnalyze);
+  body.querySelectorAll("[data-batch-file]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const fileId = checkbox.dataset.batchFile || "";
+      if (!fileId) {
+        return;
+      }
+      if (checkbox.checked) {
+        state.selectedBatchFileIds.add(fileId);
+      } else {
+        state.selectedBatchFileIds.delete(fileId);
+      }
+      renderFileCenter();
+    });
+  });
+  body.querySelectorAll("[data-preview-dashboard-file]").forEach((button) => {
+    button.addEventListener("click", () => handleFileAction("preview", button.dataset.previewDashboardFile || ""));
+  });
+  body.querySelectorAll("[data-download-dashboard-file]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const response = await downloadFileById(button.dataset.downloadDashboardFile || "");
+      if (!response.success) {
+        showToast(response.error_message || "下载失败", "error");
+      }
+    });
+  });
+  body.querySelectorAll("[data-analyze-dashboard-file]").forEach((button) => {
+    button.addEventListener("click", () => handleFileAction("analyze", button.dataset.analyzeDashboardFile || ""));
+  });
+  body.querySelectorAll("[data-delete-dashboard-file]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const response = await requestDeleteFile(button.dataset.deleteDashboardFile || "");
+      if (!response.success) {
+        showToast(response.error_message || "删除失败", "error");
+        return;
+      }
+      state.selectedBatchFileIds.delete(button.dataset.deleteDashboardFile || "");
+      showToast("文件已删除", "success");
+      await loadPhase2Data();
+    });
+  });
+  body.querySelectorAll("[data-export-dashboard-file]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const response = await exportReport({
+        file_id: button.dataset.exportDashboardFile || "",
+        project_id: state.selectedProjectId || undefined,
+        formats: [button.dataset.exportFormat || "markdown"],
+      });
+      if (!response.success) {
+        showToast(response.error_message || "导出报告失败", "error");
+        return;
+      }
+      const warnings = Array.isArray(response.warnings) ? response.warnings : [];
+      showToast(warnings.length ? warnings.join("；") : "报告导出完成", warnings.length ? "info" : "success");
+      await loadPhase2Data();
+    });
+  });
+  body.querySelectorAll("[data-attach-dashboard-file]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!state.selectedProjectId) {
+        showToast("请先选择当前项目", "error");
+        return;
+      }
+      const response = await attachProjectFile(state.selectedProjectId, button.dataset.attachDashboardFile || "");
+      if (!response.success) {
+        showToast(response.error_message || "绑定项目失败", "error");
+        return;
+      }
+      showToast("文件已绑定到当前项目", "success");
+      await loadPhase2Data();
+    });
+  });
+}
+
+function renderTaskCenter() {
+  const body = $("taskCenterBody");
+  if (!body) {
+    return;
+  }
+  const tasks = Array.isArray(state.dashboardTasksPayload?.tasks) ? state.dashboardTasksPayload.tasks : [];
+  body.innerHTML = tasks.length
+    ? `<div class="entity-list">${tasks.map((task) => `
+        <article class="entity-card">
+          <div class="entity-card-head">
+            <div>
+              <h4>${escapeHtml(task.task_type || task.intent || "unknown")}</h4>
+              <div class="entity-meta">状态：${escapeHtml(task.status || "")} · 进度：${escapeHtml(String(task.progress ?? ""))}% · 创建时间：${escapeHtml(task.created_at || "")}</div>
+            </div>
+            <div class="entity-tags">
+              <span class="entity-tag">${escapeHtml(task.project_id || "未绑定项目")}</span>
+            </div>
+          </div>
+          ${task.error_message ? `<div class="inline-error">错误原因：${escapeHtml(task.error_message)}</div>` : ""}
+          ${task.result_summary?.failed_count ? `<div class="panel-note">批量摘要：成功 ${escapeHtml(String(task.result_summary.success_count || 0))}，失败 ${escapeHtml(String(task.result_summary.failed_count || 0))}</div>` : ""}
+          <div class="inline-actions">
+            <button class="pill-button small" type="button" data-task-logs="${escapeHtml(task.task_id || "")}">查看日志</button>
+            <button class="pill-button small" type="button" data-task-result="${escapeHtml(task.task_id || "")}">查看结果</button>
+            ${task.task_type === "raman_batch_analysis" ? `<button class="pill-button small ghost" type="button" data-task-batch-csv="${escapeHtml(task.task_id || "")}">下载批量 CSV</button>` : ""}
+          </div>
+        </article>
+      `).join("")}</div>`
+    : `<div class="panel-note">当前还没有任务记录。</div>`;
+  body.querySelectorAll("[data-task-logs]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const response = await getTaskLogs(button.dataset.taskLogs || "");
+      if (!response.success) {
+        showToast(response.error_message || "加载任务日志失败", "error");
+        return;
+      }
+      const skillRuns = Array.isArray(response.skill_runs) ? response.skill_runs : [];
+      const steps = Array.isArray(response.steps) ? response.steps : [];
+      showToast(`任务日志：步骤 ${steps.length} 个，Skill 运行 ${skillRuns.length} 次`, "info");
+    });
+  });
+  body.querySelectorAll("[data-task-result]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const response = await getTaskResult(button.dataset.taskResult || "");
+      if (!response.success) {
+        showToast(response.error_message || "加载任务结果失败", "error");
+        return;
+      }
+      if (response.result_file_id) {
+        const downloadResponse = await downloadFileById(response.result_file_id);
+        if (!downloadResponse.success) {
+          showToast(downloadResponse.error_message || "下载结果失败", "error");
+        }
+        return;
+      }
+      if (response.result_summary) {
+        showToast("任务结果已刷新到页面摘要中", "info");
+        return;
+      }
+      showToast("当前任务还没有可下载结果", "info");
+    });
+  });
+  body.querySelectorAll("[data-task-batch-csv]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const response = await downloadBatchCsv(button.dataset.taskBatchCsv || "");
+      if (!response.success) {
+        showToast(response.error_message || "下载批量 CSV 失败", "error");
+      }
+    });
+  });
+}
+
+function renderReportCenter() {
+  const body = $("reportCenterBody");
+  if (!body) {
+    return;
+  }
+  const reports = Array.isArray(state.reportsPayload?.reports) ? state.reportsPayload.reports : [];
+  body.innerHTML = reports.length
+    ? `<div class="entity-list">${reports.map((report) => `
+        <article class="entity-card">
+          <div class="entity-card-head">
+            <div>
+              <h4>${escapeHtml(report.title || "未命名报告")}</h4>
+              <div class="entity-meta">项目：${escapeHtml(report.project_id || "未绑定")} · 文件：${escapeHtml(report.file_id || "未知")} · 时间：${escapeHtml(report.created_at || "")}</div>
+            </div>
+            <div class="entity-tags">
+              <span class="entity-tag">${escapeHtml(report.status || "")}</span>
+              <span class="entity-tag">${escapeHtml(report.report_type || "")}</span>
+            </div>
+          </div>
+          ${report.error_message ? `<div class="inline-error">${escapeHtml(report.error_message)}</div>` : ""}
+          <div class="inline-actions">
+            ${report.markdown_path ? `<button class="pill-button small" type="button" data-report-download="${escapeHtml(report.report_id || "")}" data-report-format="markdown">Markdown</button>` : ""}
+            ${report.html_path ? `<button class="pill-button small" type="button" data-report-download="${escapeHtml(report.report_id || "")}" data-report-format="html">HTML</button>` : ""}
+            ${report.docx_path ? `<button class="pill-button small" type="button" data-report-download="${escapeHtml(report.report_id || "")}" data-report-format="docx">Word</button>` : ""}
+            ${report.pdf_path ? `<button class="pill-button small" type="button" data-report-download="${escapeHtml(report.report_id || "")}" data-report-format="pdf">PDF</button>` : ""}
+            <button class="pill-button small ghost" type="button" data-report-delete="${escapeHtml(report.report_id || "")}">删除</button>
+          </div>
+        </article>
+      `).join("")}</div>`
+    : `<div class="panel-note">当前还没有导出报告。</div>`;
+  body.querySelectorAll("[data-report-download]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const response = await downloadReport(button.dataset.reportDownload || "", button.dataset.reportFormat || "markdown");
+      if (!response.success) {
+        showToast(response.error_message || "下载报告失败", "error");
+      }
+    });
+  });
+  body.querySelectorAll("[data-report-delete]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const response = await requestDeleteReport(button.dataset.reportDelete || "");
+      if (!response.success) {
+        showToast(response.error_message || "删除报告失败", "error");
+        return;
+      }
+      showToast("报告已删除", "success");
+      await loadPhase2Data();
+    });
+  });
+}
+
+async function loadPhase2Data() {
+  if (!state.currentUser) {
+    setAuthUiVisible(false);
+    renderProjectPanel();
+    renderFileCenter();
+    renderTaskCenter();
+    renderReportCenter();
+    return;
+  }
+  const projectId = state.selectedProjectId || "";
+  const [projects, files, tasks, reports] = await Promise.all([
+    getProjects(),
+    getFiles({ userId: state.userId, projectId }),
+    getTasks({ userId: state.userId, workspaceId: "" }),
+    getReports(projectId),
+  ]);
+  state.projectsPayload = projects?.success ? projects : { projects: [] };
+  const projectList = Array.isArray(state.projectsPayload.projects) ? state.projectsPayload.projects : [];
+  if (state.selectedProjectId && !projectList.some((item) => item.project_id === state.selectedProjectId)) {
+    state.selectedProjectId = "";
+  }
+  state.dashboardFilesPayload = files?.success ? files : { files: [] };
+  state.dashboardTasksPayload = tasks?.success ? tasks : { tasks: [] };
+  state.reportsPayload = reports?.success ? reports : { reports: [] };
+  const visibleFileIds = new Set((state.dashboardFilesPayload.files || []).map((item) => item.file_id));
+  state.selectedBatchFileIds = new Set([...state.selectedBatchFileIds].filter((fileId) => visibleFileIds.has(fileId)));
+  setAuthUiVisible(true);
+  renderProjectPanel();
+  renderFileCenter();
+  renderTaskCenter();
+  renderReportCenter();
+}
+
+async function refreshAuthSession() {
+  const response = await getAuthMe();
+  if (!response.success) {
+    state.currentUser = null;
+    state.userId = "default_user";
+    clearAuthToken();
+    state.authToken = "";
+    setAuthUiVisible(false);
+    renderAuthPanel();
+    state.conversationSidebar?.refreshConversations();
+    return false;
+  }
+  state.currentUser = response.user || null;
+  state.userId = state.currentUser?.user_id || "default_user";
+  setAuthUiVisible(true);
+  renderAuthPanel();
+  state.conversationSidebar?.refreshConversations();
+  return true;
+}
+
+async function handleLoginSubmit(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const response = await loginUser(String(form.get("username") || ""), String(form.get("password") || ""));
+  if (!response.success) {
+    showToast(response.error_message || "登录失败", "error");
+    return;
+  }
+  setAuthToken(response.token || "");
+  state.authToken = response.token || "";
+  state.currentUser = response.user || null;
+  state.userId = state.currentUser?.user_id || "default_user";
+  showToast("登录成功", "success");
+  renderAuthPanel();
+  state.conversationSidebar?.refreshConversations();
+  await loadPhase2Data();
+}
+
+async function handleRegisterSubmit(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const response = await registerUser(String(form.get("username") || ""), String(form.get("password") || ""));
+  if (!response.success) {
+    showToast(response.error_message || "注册失败", "error");
+    return;
+  }
+  setAuthToken(response.token || "");
+  state.authToken = response.token || "";
+  state.currentUser = response.user || null;
+  state.userId = state.currentUser?.user_id || "default_user";
+  showToast("注册成功，已自动登录", "success");
+  renderAuthPanel();
+  state.conversationSidebar?.refreshConversations();
+  await loadPhase2Data();
+}
+
+async function handleLogout() {
+  await logoutUser();
+  clearAuthToken();
+  state.authToken = "";
+  state.currentUser = null;
+  state.userId = "default_user";
+  state.selectedProjectId = "";
+  state.selectedBatchFileIds = new Set();
+  state.projectsPayload = { projects: [] };
+  state.reportsPayload = { reports: [] };
+  state.dashboardFilesPayload = { files: [] };
+  state.dashboardTasksPayload = { tasks: [] };
+  setAuthUiVisible(false);
+  renderAuthPanel();
+  renderProjectPanel();
+  renderFileCenter();
+  renderTaskCenter();
+  renderReportCenter();
+  state.conversationSidebar?.refreshConversations();
+  showToast("已退出登录", "success");
+}
+
+async function handleCreateProject(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const response = await createProject({
+    name: String(form.get("name") || ""),
+    description: String(form.get("description") || ""),
+  });
+  if (!response.success) {
+    showToast(response.error_message || "创建项目失败", "error");
+    return;
+  }
+  state.selectedProjectId = response.project?.project_id || "";
+  showToast("项目已创建", "success");
+  await loadPhase2Data();
+}
+
+async function handleDashboardUpload(event) {
+  event.preventDefault();
+  const file = $("dashboardFileInput")?.files?.[0];
+  if (!file) {
+    showToast("请先选择文件", "error");
+    return;
+  }
+  const response = await uploadWorkspaceFile(file, {
+    userId: state.userId,
+    conversationId: state.sessionId || "dashboard-upload",
+    projectId: state.selectedProjectId || "",
+  });
+  if (!response.success) {
+    showToast(response.error_message || "上传文件失败", "error");
+    return;
+  }
+  showToast("文件上传成功", "success");
+  await loadPhase2Data();
+}
+
+async function handleBatchAnalyze() {
+  const fileIds = [...state.selectedBatchFileIds];
+  if (!fileIds.length) {
+    showToast("请先选择至少一个文件", "error");
+    return;
+  }
+  const response = await batchAnalyze({
+    file_ids: fileIds,
+    project_id: state.selectedProjectId || undefined,
+    options: {
+      generate_report: true,
+      export_formats: ["markdown"],
+    },
+  });
+  if (!response.success) {
+    showToast(response.error_message || "批量分析失败", "error");
+    return;
+  }
+  const summary = response.summary || {};
+  showToast(`批量分析完成：成功 ${summary.success_count || 0}，失败 ${summary.failed_count || 0}`, summary.failed_count ? "info" : "success");
+  await loadPhase2Data();
+}
+
+function bindPhase2Events() {
+  $("refreshAuthBtn")?.addEventListener("click", async () => {
+    await refreshAuthSession();
+    if (state.currentUser) {
+      await loadPhase2Data();
     }
   });
-  if (state.modelListOpen) {
-    renderModelList(state.llmModelsPayload);
-  }
-  debugLog("工作台刷新完成");
-  state.refreshingDashboard = false;
-  if (button) {
-    button.disabled = false;
-    button.textContent = originalText;
-  }
+  $("refreshProjectsBtn")?.addEventListener("click", loadPhase2Data);
+  $("refreshFilesBtn")?.addEventListener("click", loadPhase2Data);
+  $("refreshTasksBtn")?.addEventListener("click", loadPhase2Data);
+  $("refreshReportsBtn")?.addEventListener("click", loadPhase2Data);
 }
 
 async function sendChatMessage(presetMessage = "") {
@@ -2300,7 +2953,8 @@ async function sendChatMessage(presetMessage = "") {
 
   const input = $("messageInput");
   const message = (presetMessage || input?.value || "").trim();
-  const selectedFile = state.selectedFile;
+  const selectedFiles = state.selectedFiles?.length ? state.selectedFiles : (state.selectedFile ? [state.selectedFile] : []);
+  const selectedFile = selectedFiles[0] || null;
   const timeoutMs = getChatRequestTimeout({ hasFile: Boolean(selectedFile), message });
 
   if (!message && !selectedFile) {
@@ -2309,9 +2963,7 @@ async function sendChatMessage(presetMessage = "") {
   }
 
   appendMessage("user", `<p>${escapeHtml(message || "请分析这个文件")}</p>`, "text");
-  if (selectedFile) {
-    appendFileCard(selectedFile);
-  }
+  selectedFiles.forEach((file) => appendFileCard(file));
 
   if (input) {
     input.value = "";
@@ -2328,8 +2980,8 @@ async function sendChatMessage(presetMessage = "") {
       message,
       sessionId: state.sessionId || "",
       userId: state.userId,
-      debug: $("chatDebug")?.checked || false,
-      file: selectedFile,
+      debug: false,
+      files: selectedFiles,
       metadata: {
         remarks: "",
         timeoutMs,
@@ -2371,11 +3023,12 @@ async function sendChatMessage(presetMessage = "") {
       $("topLlmModel").textContent = `${usedProviderName || "未知平台"} / ${usedModelId}`;
     }
     state.selectedFile = null;
+    state.selectedFiles = [];
     const fileInput = $("fileInput");
     if (fileInput) {
       fileInput.value = "";
     }
-    renderSelectedFileChip(null);
+    renderSelectedFileChip([]);
     if (input) {
       input.value = "";
     }
@@ -2384,6 +3037,10 @@ async function sendChatMessage(presetMessage = "") {
     if (state.workspaceOpen) {
       refreshWorkspacePanel();
     }
+    if (state.knowledgeBasePanel?.isOpen?.()) {
+      state.knowledgeBasePanel.refresh();
+    }
+    state.conversationSidebar?.refreshConversations();
   } catch (error) {
     removeTypingMessage();
     setBusy(false);
@@ -2404,13 +3061,43 @@ function initApp() {
 
   bindComposerEvents();
   bindPageEvents();
+  bindPhase2Events();
+  state.conversationSidebar = initConversationSidebar({
+    getState: () => state,
+    setSessionId: persistSessionId,
+    renderConversationMessages,
+    clearForNewConversation,
+    showToast,
+    refreshWorkspace: async () => {
+      if (state.workspaceOpen) {
+        await refreshWorkspacePanel();
+      }
+    },
+  });
+  state.knowledgeBasePanel = initKnowledgeBasePanel({
+    getState: () => state,
+    showToast,
+    onWorkspaceChanged: async () => {
+      if (state.workspaceOpen) {
+        await refreshWorkspacePanel();
+      }
+    },
+  });
   restoreSessionIfNeeded();
   renderWelcomeMessage();
+  renderAuthPanel();
+  setAuthUiVisible(false);
   autoResizeTextarea();
   setChatStatus(state.sessionId ? `当前会话：${state.sessionId}` : "可以直接提问，或上传任意文件后发送。");
   loadLlmModelsSafely();
   loadRamanStatusSafely();
   loadSkillsSafely();
+  state.conversationSidebar?.refreshConversations();
+  refreshAuthSession().then((loggedIn) => {
+    if (loggedIn) {
+      loadPhase2Data();
+    }
+  });
 }
 
 initApp();

@@ -63,6 +63,7 @@ def init_agent_memory_db(db_path: Path | None = None) -> None:
             connection,
             "agent_sessions",
             {
+                "user_id": "TEXT NOT NULL DEFAULT 'default_user'",
                 "title": "TEXT",
                 "last_analysis_json": "TEXT",
                 "last_file": "TEXT",
@@ -96,6 +97,214 @@ def init_agent_memory_db(db_path: Path | None = None) -> None:
         )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_agent_sessions_updated ON agent_sessions(updated_at, id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_sessions_user_updated ON agent_sessions(user_id, updated_at, id)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS file_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chunk_id TEXT UNIQUE NOT NULL,
+                user_id TEXT NOT NULL DEFAULT 'default_user',
+                conversation_id TEXT NOT NULL,
+                file_id TEXT,
+                filename TEXT,
+                source_path TEXT,
+                page TEXT,
+                section TEXT,
+                text TEXT NOT NULL,
+                token_estimate INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        _ensure_columns(
+            connection,
+            "file_chunks",
+            {
+                "source_type": "TEXT",
+                "sheet": "TEXT",
+                "chunk_index": "INTEGER DEFAULT 0",
+                "text_hash": "TEXT",
+                "updated_at": "TEXT",
+                "rag_indexed": "INTEGER DEFAULT 0",
+            },
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_chunks_conversation_file ON file_chunks(user_id, conversation_id, file_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_chunks_user_conversation_file ON file_chunks(user_id, conversation_id, file_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_chunks_text ON file_chunks(text)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rag_indexes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                vector_provider TEXT,
+                embedding_provider TEXT,
+                embedding_model TEXT,
+                chunk_count INTEGER DEFAULT 0,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        _ensure_columns(
+            connection,
+            "rag_indexes",
+            {
+                "rag_scope": "TEXT DEFAULT 'conversation'",
+                "knowledge_base_id": "TEXT",
+                "kb_file_id": "TEXT",
+            },
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rag_indexes_user_conversation_file ON rag_indexes(user_id, conversation_id, file_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rag_indexes_scope_user_conversation ON rag_indexes(rag_scope, user_id, conversation_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rag_indexes_scope_kb ON rag_indexes(rag_scope, knowledge_base_id, kb_file_id)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rag_queries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query_id TEXT UNIQUE NOT NULL,
+                user_id TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                query TEXT NOT NULL,
+                file_ids_json TEXT,
+                top_k INTEGER,
+                retrieval_mode TEXT,
+                retrieved_chunk_ids_json TEXT,
+                answer_message_id TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        _ensure_columns(
+            connection,
+            "rag_queries",
+            {
+                "rag_scope": "TEXT",
+                "knowledge_base_ids_json": "TEXT",
+                "source_breakdown_json": "TEXT",
+            },
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rag_queries_user_conversation_created ON rag_queries(user_id, conversation_id, created_at)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS knowledge_bases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                knowledge_base_id TEXT UNIQUE NOT NULL,
+                owner_user_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                visibility TEXT DEFAULT 'private',
+                enabled INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_kb_owner_enabled ON knowledge_bases(owner_user_id, enabled, deleted_at)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS knowledge_base_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kb_file_id TEXT UNIQUE NOT NULL,
+                knowledge_base_id TEXT NOT NULL,
+                owner_user_id TEXT NOT NULL,
+                original_filename TEXT NOT NULL,
+                stored_path TEXT NOT NULL,
+                file_type TEXT,
+                mime_type TEXT,
+                size INTEGER,
+                processing_status TEXT DEFAULT 'pending',
+                rag_index_status TEXT DEFAULT 'pending',
+                rag_index_error TEXT,
+                chunk_count INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_kb_files_kb_owner ON knowledge_base_files(knowledge_base_id, owner_user_id, deleted_at)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS knowledge_base_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chunk_id TEXT UNIQUE NOT NULL,
+                knowledge_base_id TEXT NOT NULL,
+                kb_file_id TEXT NOT NULL,
+                owner_user_id TEXT NOT NULL,
+                source_name TEXT,
+                source_type TEXT,
+                text TEXT NOT NULL,
+                page INTEGER,
+                sheet TEXT,
+                section TEXT,
+                chunk_index INTEGER DEFAULT 0,
+                text_hash TEXT,
+                rag_indexed INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_kb_chunks_kb_file ON knowledge_base_chunks(knowledge_base_id, kb_file_id)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS knowledge_base_permissions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                knowledge_base_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_kb_permissions_user ON knowledge_base_permissions(user_id, knowledge_base_id)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_knowledge_bases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                knowledge_base_id TEXT NOT NULL,
+                enabled INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversation_kb_user_conversation ON conversation_knowledge_bases(user_id, conversation_id, enabled)"
         )
         connection.commit()
     finally:

@@ -10,7 +10,10 @@ from backend.agent.prompts.general_chat_prompt import (
     build_general_chat_local_reply,
     build_general_chat_system_prompt,
 )
+from backend.core.model_registry import _looks_like_placeholder_secret
 from backend.core.model_router import ModelRouter
+from backend.services.user_memory_manager import UserMemoryManager
+from backend.services.workspace_manager import WorkspaceManager
 from dotenv import load_dotenv
 from raman_core.methanol.config import PROJECT_ROOT
 
@@ -44,6 +47,10 @@ class LLMService:
                 return default
 
         self.model_router = ModelRouter()
+        self.user_id = user_id
+        self.conversation_id = conversation_id
+        self.workspace_manager = WorkspaceManager()
+        self.user_memory_manager = UserMemoryManager()
         self.selection = self.model_router.get_selected_model(user_id=user_id, conversation_id=conversation_id)
         if provider_id or model_id:
             self.selection = self.model_router.resolve_selection(
@@ -62,6 +69,8 @@ class LLMService:
         self.api_key_env = str(self.provider_config.get("api_key_env") or "").strip()
         self.base_url = str(self.provider_config.get("base_url") or "").strip()
         self.api_key = str(self.provider_config.get("api_key") or "").strip()
+        self.has_real_api_key = self.provider == "ollama" or not _looks_like_placeholder_secret(self.api_key)
+        self.provider_available = bool(self.selection.get("configured")) or self.provider == "ollama"
         self.temperature = _safe_float("LLM_TEMPERATURE", 0.6)
         self.max_tokens = _safe_int("LLM_MAX_TOKENS", 4096)
         self.timeout_seconds = _safe_int("LLM_TIMEOUT_SECONDS", 60)
@@ -69,7 +78,7 @@ class LLMService:
         self.client = None
         self.import_error_message = None
 
-        if self.base_url and (self.api_key or self.provider == "ollama"):
+        if self.provider_available and self.base_url and self.has_real_api_key:
             try:
                 self.client = self.model_router.create_client(self.provider)
             except ModuleNotFoundError:
@@ -88,17 +97,17 @@ class LLMService:
             self.get_provider_info().get("provider_label"),
             self.model,
             self.base_url,
-            bool(self.api_key),
+            self.has_real_api_key,
             self.import_error_message is None,
             self.import_error_message or "",
         )
 
     def get_provider_info(self) -> dict[str, Any]:
         """返回当前大模型平台与配置状态，供 Agent 直接回答“用的是哪家平台”。"""
-        configured = bool(self.api_key)
+        configured = self.has_real_api_key
         provider_name = self.provider_display_name or "未配置平台大模型"
         provider_label = self.provider or "未配置"
-        available = bool(self.selection.get("configured", configured) or self.provider == "ollama")
+        available = self.provider_available
         reason = str(self.selection.get("reason") or self.import_error_message or "").strip()
 
         return {
@@ -149,6 +158,8 @@ class LLMService:
         text = str(exc or self.import_error_message or "").strip()
         if self.provider == "ollama":
             return "Ollama 调用失败，请确认 ollama serve 已启动，并且已 pull 对应模型。"
+        if "示例占位值" in text:
+            return f"当前平台 API Key 仍是示例占位值，请检查 .env 中的 {self.api_key_env or '对应 API_KEY'}。"
         if (self.api_key_env and not self.api_key) or "API Key 未配置" in text or "API_KEY" in text:
             return f"当前平台 API Key 未配置，请检查 .env 中的 {self.api_key_env or '对应 API_KEY'}。"
         if not self.base_url or "BASE_URL" in text:
@@ -159,7 +170,7 @@ class LLMService:
 
     def _chat_complete(self, system_prompt: str, user_prompt: str) -> tuple[str, dict | None]:
         """执行一次通用 OpenAI-compatible 对话请求。"""
-        if self.provider != "ollama" and not self.api_key:
+        if self.provider != "ollama" and not self.has_real_api_key:
             raise RuntimeError(self.import_error_message or f"未配置 {self.api_key_env or 'API_KEY'}")
         if self.import_error_message:
             raise RuntimeError(self.import_error_message)
@@ -182,15 +193,104 @@ class LLMService:
         raw = response.model_dump() if hasattr(response, "model_dump") else None
         return (content or "").strip(), raw
 
+    def build_model_context(self, extra_context: dict | None = None) -> dict[str, Any]:
+        """Build bounded context for normal chat and skill explanations."""
+        context: dict[str, Any] = dict(extra_context or {})
+        if self.user_id:
+            try:
+                memory = self.user_memory_manager.get_user_memory(self.user_id)
+                profile = memory.get("profile") if isinstance(memory, dict) else {}
+                context["user_memory"] = {
+                    "preferred_provider": memory.get("preferred_provider"),
+                    "preferred_model": memory.get("preferred_model"),
+                    "recent_skills": list(memory.get("recent_skills") or [])[:8],
+                    "profile": profile if isinstance(profile, dict) else {},
+                }
+            except Exception as exc:
+                logger.debug("Failed to load user memory: %s", exc)
+        if self.user_id and self.conversation_id:
+            try:
+                from backend.agent.session_store import get_recent_messages, get_session
+
+                session = get_session(self.conversation_id) or {}
+                context["conversation_summary"] = str(session.get("summary") or "")[:2000]
+                recent_messages = get_recent_messages(self.conversation_id, limit=8)
+                context["recent_messages"] = [
+                    {
+                        "role": item.get("role"),
+                        "content": str(item.get("content") or "")[:1000],
+                        "created_at": item.get("created_at"),
+                    }
+                    for item in recent_messages
+                ]
+            except Exception as exc:
+                logger.debug("Failed to load recent messages: %s", exc)
+            try:
+                workspace_context = self.workspace_manager.read_workspace_context(self.user_id, self.conversation_id)
+                workspace_summary = str(workspace_context.get("context_summary") or "")[:2000]
+                if workspace_summary and not context.get("conversation_summary"):
+                    context["conversation_summary"] = workspace_summary
+                active_files = []
+                for item in list(workspace_context.get("active_files") or [])[-5:]:
+                    active_files.append(
+                        {
+                            "file_id": item.get("file_id"),
+                            "filename": item.get("original_filename") or item.get("filename"),
+                            "file_type": item.get("file_type"),
+                            "size": item.get("size"),
+                        }
+                    )
+                context["workspace"] = {
+                    "context_summary": workspace_summary,
+                    "active_files": active_files,
+                    "task_state": workspace_context.get("task_state") or {},
+                }
+                workspace_messages = self.workspace_manager.get_recent_messages(self.user_id, self.conversation_id, limit=8)
+                if workspace_messages:
+                    merged_messages = list(context.get("recent_messages") or [])
+                    seen_messages = {
+                        (
+                            item.get("role"),
+                            item.get("content"),
+                            item.get("created_at"),
+                        )
+                        for item in merged_messages
+                    }
+                    for item in workspace_messages:
+                        normalized_item = {
+                            "role": item.get("role"),
+                            "content": str(item.get("content") or "")[:1000],
+                            "created_at": item.get("created_at"),
+                        }
+                        key = (
+                            normalized_item.get("role"),
+                            normalized_item.get("content"),
+                            normalized_item.get("created_at"),
+                        )
+                        if key not in seen_messages:
+                            merged_messages.append(normalized_item)
+                            seen_messages.add(key)
+                    context["recent_messages"] = merged_messages[-8:]
+            except Exception as exc:
+                logger.debug("Failed to load workspace context: %s", exc)
+        return context
+
     def generate_general_reply(self, message: str, system_context: dict | None = None) -> dict:
         """生成通用对话回复，失败时返回降级内容。"""
-        system_prompt = build_general_chat_system_prompt(system_context)
+        model_context = self.build_model_context(system_context)
+        system_prompt = build_general_chat_system_prompt(model_context)
         user_prompt = (
             "请根据下面这条用户消息进行自然对话。"
             "如果问题涉及真实系统状态、实验记录、模型文件、最近一次分析结果等你无法直接知道的内容，"
             "请明确说明需要通过系统工具查询，不要编造。\n\n"
             f"用户消息：{message}"
         )
+        if model_context.get("recent_messages") or model_context.get("conversation_summary") or model_context.get("user_memory"):
+            user_prompt += (
+                "\n\n# 可用上下文摘要\n"
+                f"{model_context}"
+                "\n\n请只把这些上下文当作辅助记忆；如果上下文不足，请直接说明。"
+            )
         try:
             reply, raw = self._chat_complete(system_prompt, user_prompt)
             if not reply:
@@ -215,7 +315,7 @@ class LLMService:
                 self.get_provider_info().get("provider_label"),
                 self.model,
                 self.base_url,
-                bool(self.api_key),
+                self.has_real_api_key,
                 type(exc).__name__,
                 exc,
             )
@@ -281,7 +381,7 @@ class LLMService:
                 self.get_provider_info().get("provider_label"),
                 self.model,
                 self.base_url,
-                bool(self.api_key),
+                self.has_real_api_key,
                 type(exc).__name__,
                 exc,
             )
@@ -366,7 +466,7 @@ class LLMService:
                 self.get_provider_info().get("provider_label"),
                 self.model,
                 self.base_url,
-                bool(self.api_key),
+                self.has_real_api_key,
                 type(exc).__name__,
                 exc,
             )

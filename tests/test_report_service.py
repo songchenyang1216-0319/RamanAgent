@@ -134,6 +134,9 @@ def test_report_contains_prediction_and_quality_sections(tmp_path, monkeypatch):
     assert "预测浓度" in content
     assert "## 4. 光谱质量评价" in content
     assert "总体质量" in content
+    assert "谱图质量评分" in content
+    assert "是否存在明显基线漂移" in content
+    assert "## 8. AI 专业解释" in content
 
 
 def test_report_does_not_include_api_key_or_absolute_path(tmp_path, monkeypatch):

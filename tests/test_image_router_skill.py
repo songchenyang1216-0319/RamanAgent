@@ -140,7 +140,7 @@ def test_disabled_image_router_skill_returns_friendly_prompt(monkeypatch):
 
     def fake_load():
         config, error = real_loader()
-        config["skills"]["image-router-skill"]["enabled"] = False
+        config["skills"]["image-understanding"]["enabled"] = False
         return config, error
 
     monkeypatch.setattr("backend.skills.registry._load_skills_config", fake_load)
@@ -151,7 +151,7 @@ def test_disabled_image_router_skill_returns_friendly_prompt(monkeypatch):
     )
     payload = response.json()
     assert payload["success"] is False
-    assert "image-router-skill 当前被禁用" in payload["reply"]
+    assert "image-understanding 当前被禁用" in payload["reply"]
 
 
 def test_disabled_image_sub_action_returns_friendly_prompt(monkeypatch):
@@ -162,8 +162,8 @@ def test_disabled_image_sub_action_returns_friendly_prompt(monkeypatch):
 
     def fake_load():
         config, error = real_loader()
-        config["skills"]["image-router-skill"]["enabled"] = True
-        config["skills"]["image-router-skill"]["actions"]["ocr_extract_text"] = False
+        config["skills"]["image-understanding"]["enabled"] = True
+        config["skills"]["image-understanding"]["actions"]["ocr_extract_text"] = False
         return config, error
 
     monkeypatch.setattr("backend.skills.registry._load_skills_config", fake_load)

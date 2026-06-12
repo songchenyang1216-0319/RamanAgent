@@ -4,6 +4,7 @@
 .git/
 workspace/
 outputs/
+storage/
 __pycache__/
 *.pyc
 .pytest_cache/

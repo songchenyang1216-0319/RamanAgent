@@ -431,6 +431,8 @@ class MultiSkillAgentService:
             ("继续", "展开", "详细", "解释", "分析", "处理", "确认", "提炼", "总结"),
         ):
             return "last_analysis_followup"
+        if lowered.startswith("按") and len(text) <= 12:
+            return "last_analysis_followup"
         if lowered in {"生成报告", "出报告"}:
             return "report_generation"
         return None
@@ -546,6 +548,9 @@ class MultiSkillAgentService:
         skill_name = str(last_analysis.get("skill_name") or "").strip()
         action_name = str(last_analysis.get("action_name") or "").strip()
         saved_file = str(last_analysis.get("saved_file") or "").strip()
+        if not saved_file and session_id:
+            session = get_session(session_id) or {}
+            saved_file = str(session.get("last_file") or "").strip()
         if not skill_name or not action_name or not saved_file:
             return self._build_generic_last_analysis_explanation_response(last_analysis, session_id, debug=debug)
 
@@ -555,18 +560,29 @@ class MultiSkillAgentService:
         if not file_path.exists():
             return self._build_generic_last_analysis_explanation_response(last_analysis, session_id, debug=debug)
 
+        if skill_name == "data-analysis-skill" and action_name == "clarify":
+            action_name = "summarize_table"
+
         task_type = str(last_analysis.get("data", {}).get("task_type") or "extract").strip() or "extract"
         contextual_message = self._build_followup_context_message(last_analysis, message)
+        execution_message = message if skill_name == "data-analysis-skill" else contextual_message
         skill_result = execute_skill(
             skill_name,
             action_name=action_name,
             file_path=str(file_path),
             task_type=task_type,
             session_id=session_id,
-            message=contextual_message,
+            message=execution_message,
             original_message=message,
         )
-        reply = str(skill_result.data.get("reply_text") or skill_result.summary or "").strip()
+        resolved_action_name = str(skill_result.action_name or skill_result.data.get("action") or action_name or "").strip() or action_name
+        reply = str(
+            skill_result.data.get("analysis_markdown")
+            or skill_result.data.get("markdown")
+            or skill_result.data.get("reply_text")
+            or skill_result.summary
+            or ""
+        ).strip()
         if not reply:
             reply = "我已经接着刚才那个文件继续处理了。"
         if not skill_result.success:
@@ -591,14 +607,14 @@ class MultiSkillAgentService:
             category="tool",
             reply=reply,
             next_action="如果还要继续，可以直接在这份结果上补一句你的下一步要求，我会沿用同一份上下文继续处理。",
-            tool_used=action_name,
+            tool_used=resolved_action_name,
             tool_result=None,
             debug=debug,
             success=bool(skill_result.success),
             error_message=None if skill_result.success else reply,
             data={
                 "skill_name": skill_name,
-                "action_name": action_name,
+                "action_name": resolved_action_name,
                 "saved_file": saved_file,
                 "continued": True,
                 "task_type": task_type,
@@ -606,6 +622,9 @@ class MultiSkillAgentService:
             },
             session_id=session_id,
         )
+        response["skill_name"] = skill_name
+        response["action_name"] = resolved_action_name
+        response["tool_info"] = dict(skill_result.data.get("tool_info") or {})
         self._refresh_task_state_for_response(session_id, response)
         return response
 

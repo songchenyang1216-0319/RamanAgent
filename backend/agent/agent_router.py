@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -45,6 +46,7 @@ from backend.skills.data_analysis_skill import (
 from backend.skills.table_query_planner import TableQueryPlanner
 from backend.skills.upload_service import delete_uploaded_skill, list_uploaded_skills, save_uploaded_skill
 from backend.services.history_service import save_analysis_history
+from backend.services.file_service import FileCatalogService
 from backend.api.methanol_api import build_figure_web_urls, build_report_web_urls
 from backend.services.model_registry_service import ModelRegistryService
 from backend.services.llm_service import LLMService
@@ -60,16 +62,62 @@ service = RamanAgentService()
 orchestrator = AgentOrchestrator()
 model_registry_service = ModelRegistryService()
 workspace_manager = WorkspaceManager()
+file_catalog = FileCatalogService()
 user_memory_manager = UserMemoryManager()
 task_trace_manager = TaskTraceManager(workspace_manager=workspace_manager)
 UPLOAD_DIR = OUTPUT_DIR / "uploads"
 logger = logging.getLogger(__name__)
 IMAGE_FILE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 TABLE_FILE_SUFFIXES = {".csv", ".xlsx", ".xls"}
+CODE_FILE_SUFFIXES = {".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".html", ".css", ".sql", ".sh", ".ps1"}
 DATA_ANALYSIS_MISSING_MESSAGE = "当前识别为普通表格数据，但 data-analysis-skill 未启用。你可以在 Skill 管理中启用表格数据分析 Skill。"
 IMAGE_ROUTER_MISSING_MESSAGE = "当前已识别为图片文件，但还没有安装图片处理 Skill。你可以上传 image-router-skill，或后续启用视觉模型能力。"
 RAMAN_SKILL_DISABLED_MESSAGE = "当前识别为 Raman / 光谱数据请求，但 Raman 光谱分析 Skill 未启用。"
 table_query_planner = TableQueryPlanner()
+
+
+def _normalize_string_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                raw_items = parsed
+            else:
+                raw_items = text.split(",")
+        except Exception:
+            raw_items = text.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        raw_items = [value]
+    result = []
+    seen = set()
+    for item in raw_items:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _dedupe_uploaded_files(items: list[object]) -> list[UploadFile]:
+    result: list[UploadFile] = []
+    seen = set()
+    for item in items:
+        if not getattr(item, "filename", "") or not hasattr(item, "read"):
+            continue
+        key = (id(item), getattr(item, "filename", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
 
 
 def _llm_model_info(
@@ -100,6 +148,10 @@ def _is_image_file_suffix(file_suffix: str | None) -> bool:
 
 def _is_table_file_suffix(file_suffix: str | None) -> bool:
     return str(file_suffix or "").lower() in TABLE_FILE_SUFFIXES
+
+
+def _is_code_file_suffix(file_suffix: str | None) -> bool:
+    return str(file_suffix or "").lower() in CODE_FILE_SUFFIXES
 
 
 class AgentChatRequest(BaseModel):
@@ -248,6 +300,38 @@ def _resolve_referenced_active_file(user_id: str, conversation_id: str, message:
             continue
         if PROJECT_ROOT.resolve() in resolved.parents and resolved.exists() and resolved.is_file():
             return resolved, item
+    return None
+
+
+def _message_mentions_file_context(message: str) -> bool:
+    text = str(message or "").lower()
+    markers = (
+        "刚才",
+        "上次",
+        "那个文件",
+        "这个文件",
+        "当前文件",
+        "上一个文件",
+        "继续处理",
+        "继续分析",
+        "总结这个",
+        "分析这个",
+        "处理这个",
+        "转换这个",
+        "生成报告",
+        "this file",
+        "uploaded file",
+        "previous file",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _extract_memory_note(message: str) -> str | None:
+    text = str(message or "").strip()
+    for marker in ("请记住", "帮我记住", "记住"):
+        if text.startswith(marker):
+            note = text[len(marker) :].strip(" ：:，,。")
+            return note or None
     return None
 
 
@@ -927,17 +1011,17 @@ def _infer_table_skill_route(message: str, file_path: str | Path | None = None, 
     if _looks_like_raman_file_task(message):
         return "raman_spectroscopy_skill", "predict_methanol_concentration", {"route": "table_raman_route", "reason": "raman_message_keywords"}
 
-    if get_skill("data-analysis-skill") is None:
+    if get_skill("table-analysis") is None:
         return None, None, {"route": "data_analysis_missing_skill", "reason": "data_analysis_skill_not_enabled"}
 
     def _build_table_plan_route(reason: str) -> tuple[str | None, str | None, dict | None]:
         if not file_path:
             action_name = infer_data_analysis_action(message, default_action="summarize_table")
-            return "data-analysis-skill", action_name, {"route": "table_data_analysis_route", "reason": reason}
+            return "table-analysis", action_name, {"route": "table_data_analysis_route", "reason": reason}
         try:
             load_result = load_table_file(file_path, preview_only=False)
             plan = table_query_planner.plan(message, load_result.df)
-            return "data-analysis-skill", plan.action, {
+            return "table-analysis", plan.action, {
                 "route": "table_data_analysis_route",
                 "reason": reason,
                 "table_query_plan": plan.to_dict(),
@@ -946,7 +1030,7 @@ def _infer_table_skill_route(message: str, file_path: str | Path | None = None, 
             }
         except Exception as exc:
             action_name = infer_data_analysis_action(message, default_action="summarize_table")
-            return "data-analysis-skill", action_name, {
+            return "table-analysis", action_name, {
                 "route": "table_data_analysis_route",
                 "reason": f"{reason}:planner_fallback:{type(exc).__name__}",
             }
@@ -962,10 +1046,7 @@ def _infer_table_skill_route(message: str, file_path: str | Path | None = None, 
         }
 
     if suffix == ".csv" and normalized in {"请分析这个文件", "帮我分析这个文件", "分析这个文件", "请分析一下这个文件", "请分析该文件"}:
-        return "raman_spectroscopy_skill", "predict_methanol_concentration", {
-            "route": "table_raman_route",
-            "reason": "generic_csv_analysis_default",
-        }
+        return _build_table_plan_route("generic_csv_table_analysis_default")
 
     return _build_table_plan_route(f"default_table_analysis:{table_signal.get('reason')}")
 
@@ -985,6 +1066,8 @@ def _select_skill_route(
         return None, None, {"route": "image_router_missing_skill", "reason": f"image_suffix:{file_suffix}"}
     if has_file and _is_table_file_suffix(file_suffix):
         return _infer_table_skill_route(message, file_path=file_path, file_suffix=file_suffix)
+    if has_file and _is_code_file_suffix(file_suffix):
+        return "code-assistant", "explain_code", {"route": "builtin_skill_rule", "reason": f"code_suffix:{file_suffix}"}
     uploaded_skill, route_info = match_uploaded_skill(message, file_suffix=file_suffix)
     if uploaded_skill is not None:
         return uploaded_skill.name, "run_uploaded_skill", route_info
@@ -1547,6 +1630,21 @@ def get_skills() -> dict:
         }
 
 
+@router.get("/skills/logs")
+def get_skill_logs(
+    user_id: str = DEFAULT_USER_ID,
+    conversation_id: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """返回 Skill 执行日志。"""
+    logs = task_trace_manager.list_skill_logs(user_id=user_id, conversation_id=conversation_id, limit=limit)
+    return {
+        "success": True,
+        "logs": logs,
+        "total": len(logs),
+    }
+
+
 @router.post("/skills/upload")
 async def upload_skill_zip(file: UploadFile = File(...)) -> dict:
     """上传 Skill zip 压缩包。"""
@@ -1698,6 +1796,10 @@ async def chat(request: Request) -> dict:
     user_id = DEFAULT_USER_ID
     debug = False
     uploaded_file = None
+    uploaded_files: list[UploadFile] = []
+    file_ids: list[str] = []
+    knowledge_base_ids: list[str] = []
+    rag_scope: str | None = None
     metadata: dict[str, str | None] = {}
     provider_id: str | None = None
     model_id: str | None = None
@@ -1711,6 +1813,10 @@ async def chat(request: Request) -> dict:
         model_id = str(form.get("model_id") or "").strip() or None
         debug = _as_bool(form.get("debug"))
         uploaded_file = form.get("file")
+        uploaded_files = _dedupe_uploaded_files([uploaded_file, *list(form.getlist("files") or [])])
+        file_ids = _normalize_string_list(form.get("file_ids") or form.getlist("file_ids"))
+        knowledge_base_ids = _normalize_string_list(form.get("knowledge_base_ids") or form.getlist("knowledge_base_ids"))
+        rag_scope = str(form.get("rag_scope") or "").strip() or None
         metadata = {
             "sample_name": str(form.get("sample_name") or "").strip() or None,
             "sample_type": str(form.get("sample_type") or "").strip() or None,
@@ -1728,12 +1834,19 @@ async def chat(request: Request) -> dict:
         provider_id = str(payload.get("provider_id") or "").strip() or None
         model_id = str(payload.get("model_id") or "").strip() or None
         debug = bool(payload.get("debug", False))
+        file_ids = _normalize_string_list(payload.get("file_ids"))
+        knowledge_base_ids = _normalize_string_list(payload.get("knowledge_base_ids"))
+        rag_scope = str(payload.get("rag_scope") or "").strip() or None
 
     resolved_session_id = _ensure_session_id(str(conversation_id).strip() if conversation_id else None)
     resolved_conversation_id = resolved_session_id
     workspace = workspace_manager.create_workspace(user_id, resolved_session_id)
     resolved_user_id = workspace["user_id"]
+    update_session(resolved_session_id, "user_id", resolved_user_id)
     effective_message = message or "请分析这个文件"
+    memory_note = _extract_memory_note(effective_message)
+    if memory_note:
+        user_memory_manager.remember_note(resolved_user_id, memory_note)
     user_memory = user_memory_manager.get_user_memory(resolved_user_id)
     workspace_manager.update_memory_snapshot(resolved_user_id, resolved_session_id, user_memory)
     workspace_context = workspace_manager.read_workspace_context(resolved_user_id, resolved_session_id)
@@ -1744,7 +1857,9 @@ async def chat(request: Request) -> dict:
         effective_message,
         metadata={
             "debug": debug,
-            "has_file": uploaded_file is not None and bool(getattr(uploaded_file, "filename", "")),
+            "has_file": bool(uploaded_files or file_ids),
+            "file_ids": file_ids,
+            "knowledge_base_ids": knowledge_base_ids,
             "context_summary_chars": len(workspace_context.get("context_summary") or ""),
             "conversation_id": resolved_conversation_id,
         },
@@ -1760,21 +1875,54 @@ async def chat(request: Request) -> dict:
         "model_id": model_id,
         "debug": debug,
         "metadata": metadata,
+        "explicit_has_file": bool(uploaded_files or file_ids),
+        "file_ids": list(file_ids),
+        "knowledge_base_ids": list(knowledge_base_ids),
+        "rag_scope": rag_scope,
     }
-    if uploaded_file is not None and getattr(uploaded_file, "filename", ""):
-        save_path = await _save_uploaded_attachment(uploaded_file, user_id=resolved_user_id, conversation_id=resolved_session_id)
-        orchestrator_payload["file_path"] = str(save_path)
-        orchestrator_payload["file_name"] = save_path.name
+    selected_files: list[dict] = []
+    if uploaded_files:
+        for item in uploaded_files:
+            try:
+                info = await workspace_manager.save_upload_file(resolved_user_id, resolved_session_id, item)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            selected_files.append(info)
+        orchestrator_payload["files"] = selected_files
+        orchestrator_payload["file_ids"] = [str(item.get("file_id")) for item in selected_files if item.get("file_id")]
+        first_path = PROJECT_ROOT / str(selected_files[0].get("path") or "")
+        orchestrator_payload["file_path"] = str(first_path)
+        orchestrator_payload["file_name"] = str(selected_files[0].get("filename") or first_path.name)
+    elif file_ids:
+        selected_files = file_catalog.get_files_by_ids(file_ids, user_id=resolved_user_id, is_admin=False)
+        if selected_files:
+            orchestrator_payload["files"] = selected_files
+            first_path = PROJECT_ROOT / str(selected_files[0].get("path") or "")
+            orchestrator_payload["file_path"] = str(first_path)
+            orchestrator_payload["file_name"] = str(selected_files[0].get("filename") or first_path.name)
     else:
-        referenced_active_file = _resolve_referenced_active_file(resolved_user_id, resolved_session_id, effective_message)
+        if _message_mentions_file_context(effective_message) and any(marker in effective_message for marker in ("这些文件", "这些文档", "这几个文件", "所有文件", "全部文件", "刚才这些", "刚才那些")):
+            active_files = workspace_manager.read_active_files(resolved_user_id, resolved_session_id)[-5:]
+            selected_files = list(active_files or [])
+            if selected_files:
+                orchestrator_payload["files"] = selected_files
+                orchestrator_payload["file_ids"] = [str(item.get("file_id")) for item in selected_files if item.get("file_id")]
+                first_path = PROJECT_ROOT / str(selected_files[0].get("path") or "")
+                orchestrator_payload["file_path"] = str(first_path)
+                orchestrator_payload["file_name"] = str(selected_files[0].get("filename") or first_path.name)
+        referenced_active_file = None if selected_files else _resolve_referenced_active_file(resolved_user_id, resolved_session_id, effective_message)
         if referenced_active_file is not None:
-            save_path, _ = referenced_active_file
+            save_path, active_item = referenced_active_file
+            selected_files = [active_item]
+            orchestrator_payload["files"] = selected_files
+            if active_item.get("file_id"):
+                orchestrator_payload["file_ids"] = [str(active_item.get("file_id"))]
             orchestrator_payload["file_path"] = str(save_path)
             orchestrator_payload["file_name"] = save_path.name
         else:
             session = get_session(resolved_session_id) or {}
             last_file = str(session.get("last_file") or "").strip()
-            if last_file:
+            if last_file and _message_mentions_file_context(effective_message):
                 candidate = Path(last_file)
                 if not candidate.is_absolute():
                     candidate = PROJECT_ROOT / candidate
@@ -1793,6 +1941,65 @@ async def chat(request: Request) -> dict:
         or response_payload.get("error_message")
         or "处理完成。"
     )
+    task_id: str | None = None
+    should_trace = bool(
+        response_payload.get("skill_used")
+        or response_payload.get("used_skill")
+        or response_payload.get("tool_used")
+        or response_payload.get("intent") in {"web_search", "document_processing", "csv_analysis", "raman_analysis", "report_generation", "image_understanding"}
+    )
+    if should_trace:
+        file_path_value = str(orchestrator_payload.get("file_path") or "").strip()
+        input_files = list(selected_files or [])
+        if file_path_value and not input_files:
+            input_files = _workspace_input_files(resolved_user_id, resolved_session_id, Path(file_path_value))
+        task, _ = _start_task_trace(
+            user_id=resolved_user_id,
+            conversation_id=resolved_session_id,
+            intent=str(response_payload.get("intent") or "agent_task"),
+            input_message=effective_message,
+            input_files=input_files,
+        )
+        task_id = task["task_id"]
+        execute_step = task_trace_manager.add_step(
+            task_id,
+            "执行 Agent 路由",
+            detail={
+                "route": response_payload.get("route"),
+                "skill_name": response_payload.get("skill_name"),
+                "tool_name": response_payload.get("tool_name"),
+            },
+        )
+        status = "success" if response_payload.get("success") else "failed"
+        task_trace_manager.finish_step(
+            execute_step["step_id"],
+            status=status,
+            detail={"artifacts": response_payload.get("artifacts") or []},
+            error_message=response_payload.get("error_message") if status == "failed" else None,
+        )
+        if response_payload.get("skill_name"):
+            _record_skill_trace(
+                task_id=task_id,
+                skill_name=str(response_payload.get("skill_name")),
+                ability_name=response_payload.get("skill_action") or response_payload.get("action_name"),
+                input_files=input_files,
+                response_payload=response_payload,
+                raw_result_summary=assistant_reply,
+            )
+        else:
+            task_trace_manager.update_task(
+                task_id,
+                status=status,
+                progress=100,
+                error_message=response_payload.get("error_message") if status == "failed" else None,
+                result_summary={"reply": assistant_reply[:500]},
+            )
+        response_payload["task_id"] = task_id
+        response_payload["task"] = {
+            "task_id": task_id,
+            "status": status,
+            "steps": task_trace_manager.get_task_trace(task_id).get("steps", []),
+        }
     append_message(resolved_session_id, "assistant", assistant_reply)
     finalized = _finalize_workspace_response(
         response_payload,
@@ -1800,6 +2007,7 @@ async def chat(request: Request) -> dict:
         conversation_id=resolved_session_id,
         user_message=effective_message,
         assistant_reply=assistant_reply,
+        task_id=task_id,
     )
     _apply_task_state_from_response(resolved_session_id, finalized)
     session_patch = {"last_analysis": _build_session_analysis_payload(finalized, resolved_session_id)}
@@ -1809,6 +2017,8 @@ async def chat(request: Request) -> dict:
             session_patch["last_file"] = str(Path(file_path_value).relative_to(PROJECT_ROOT))
         except Exception:
             session_patch["last_file"] = file_path_value
+    if selected_files:
+        session_patch["last_files"] = selected_files[-20:]
     for key, value in session_patch.items():
         update_session(resolved_session_id, key, value)
     return finalized
@@ -2103,6 +2313,57 @@ async def chat(request: Request) -> dict:
         if response.get("skill_name"):
             user_memory_manager.add_recent_skill(resolved_user_id, response.get("skill_name"))
         assistant_reply = response.get("reply") or response.get("llm_explanation") or response.get("error_message") or "处理完成。"
+        append_message(resolved_session_id, "assistant", assistant_reply)
+        _apply_task_state_from_response(resolved_session_id, response)
+        return _finalize_workspace_response(
+            response,
+            user_id=resolved_user_id,
+            conversation_id=resolved_session_id,
+            user_message=effective_message,
+            assistant_reply=assistant_reply,
+            task_id=task["task_id"],
+        )
+
+    contextual_response = service.chat(
+        effective_message,
+        extra_params={
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "user_id": resolved_user_id,
+            "conversation_id": resolved_session_id,
+        },
+        debug=debug,
+        session_id=resolved_session_id,
+    )
+    contextual_intents = {
+        "context_missing_analysis",
+        "task_state_status",
+        "last_prediction",
+        "last_analysis_explanation",
+        "last_analysis_followup",
+        "explain_result",
+        "generate_report",
+        "find_similar_history",
+    }
+    if contextual_response.get("intent") in contextual_intents:
+        task, _ = _start_task_trace(
+            user_id=resolved_user_id,
+            conversation_id=resolved_session_id,
+            intent=str(contextual_response.get("intent") or "session_context"),
+            input_message=effective_message,
+            input_files=_workspace_input_files(resolved_user_id, resolved_session_id),
+        )
+        response = _attach_source(contextual_response, "session_context", debug=debug)
+        response["task_id"] = task["task_id"]
+        assistant_reply = response.get("reply") or response.get("llm_explanation") or response.get("error_message") or "处理完成。"
+        _record_skill_trace(
+            task_id=task["task_id"],
+            skill_name=response.get("skill_name") or response.get("tool_used") or "session_context",
+            ability_name=response.get("action_name") or response.get("intent"),
+            input_files=_workspace_input_files(resolved_user_id, resolved_session_id),
+            response_payload=response,
+            raw_result_summary=assistant_reply,
+        )
         append_message(resolved_session_id, "assistant", assistant_reply)
         _apply_task_state_from_response(resolved_session_id, response)
         return _finalize_workspace_response(

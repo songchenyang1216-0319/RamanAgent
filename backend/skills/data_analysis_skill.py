@@ -541,7 +541,10 @@ class DataAnalysisSkill(BaseSkill):
         rows = []
         for value, count in counts.head(limit).items():
             rows.append({"value": str(value), "count": int(count), "ratio": round(int(count) / total, 4) if total else 0.0})
-        markdown = self._markdown_table(["类别", "数量", "占比"], [[row["value"], row["count"], f'{row["ratio"] * 100:.2f}%'] for row in rows])
+        markdown = (
+            f"已按 `{plan.group_by}` 分组统计，结果如下：\n\n"
+            + self._markdown_table(["类别", "数量", "占比"], [[row["value"], row["count"], f'{row["ratio"] * 100:.2f}%'] for row in rows])
+        )
         if len(counts) > limit:
             markdown += f"\n\n已按数量展示前 **{limit}** 类，其余类别已省略。"
         summary = f"已按 `{plan.group_by}` 统计数量，共识别 {len(counts)} 个类别。"

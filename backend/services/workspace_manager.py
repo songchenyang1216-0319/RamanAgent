@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import mimetypes
+import os
 import re
 import shutil
 from datetime import datetime
@@ -15,9 +17,12 @@ from fastapi import UploadFile
 
 from raman_core.methanol.config import PROJECT_ROOT
 
+from .file_service import FileCatalogService
+
 
 DEFAULT_USER_ID = "default_user"
-WORKSPACE_ROOT = PROJECT_ROOT / "workspace"
+_workspace_root_value = Path(os.getenv("WORKSPACE_ROOT") or "storage/workspaces")
+WORKSPACE_ROOT = _workspace_root_value if _workspace_root_value.is_absolute() else PROJECT_ROOT / _workspace_root_value
 
 
 def now_iso() -> str:
@@ -60,11 +65,24 @@ def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def project_relative_or_display(path: Path) -> str:
+    """Return a stable display path without assuming every workspace lives under PROJECT_ROOT."""
+    resolved = path.resolve()
+    try:
+        return str(resolved.relative_to(PROJECT_ROOT)).replace("\\", "/")
+    except ValueError:
+        return str(resolved)
+
+
 class WorkspaceManager:
     """Create and maintain per-conversation workspace files."""
 
     def __init__(self, root: Path | None = None) -> None:
+        from .file_processor import FileProcessorRegistry
+
         self.root = Path(root) if root is not None else WORKSPACE_ROOT
+        self.file_catalog = FileCatalogService()
+        self.file_processors = FileProcessorRegistry()
 
     def normalize_user_id(self, user_id: str | None = None) -> str:
         return safe_segment(user_id, fallback=DEFAULT_USER_ID)
@@ -120,7 +138,7 @@ class WorkspaceManager:
             {
                 "user_id": resolved_user_id,
                 "conversation_id": resolved_conversation_id,
-                "workspace_path": str(workspace_path.relative_to(PROJECT_ROOT)),
+                "workspace_path": project_relative_or_display(workspace_path),
                 "updated_at": now_iso(),
             }
         )
@@ -146,23 +164,99 @@ class WorkspaceManager:
         workspace = self.create_workspace(user_id, conversation_id)
         return workspace["user_id"], workspace["conversation_id"], workspace["path"]
 
-    async def save_upload_file(self, user_id: str | None, conversation_id: str | None, file: UploadFile) -> dict[str, Any]:
+    async def save_upload_file(self, user_id: str | None, conversation_id: str | None, file: UploadFile, project_id: str | None = None) -> dict[str, Any]:
         user, conversation, workspace_path = self._ensure(user_id, conversation_id)
         original_name = file.filename or "upload.bin"
         safe_name = safe_filename(original_name, fallback="upload")
-        target = workspace_path / "uploads" / f"{Path(safe_name).stem}_{uuid4().hex[:8]}{Path(safe_name).suffix}"
         content = await file.read()
         if not content:
             raise ValueError("上传文件为空。")
+        content_hash = hashlib.sha256(content).hexdigest()
+        existing = self.file_catalog.find_existing_upload(
+            workspace_id=conversation,
+            user_id=user,
+            original_filename=original_name,
+            size=len(content),
+            content_hash=content_hash,
+        )
+        if existing is not None:
+            existing["processing_status"] = existing.get("processing_status") or "success"
+            existing["processing_summary"] = existing.get("processing_summary") or "检测到重复上传，已复用工作区中的原文件。"
+            active_files = self.read_active_files(user, conversation)
+            active_files = [item for item in active_files if item.get("file_id") != existing["file_id"]]
+            active_files.append(existing)
+            self.update_active_files(user, conversation, active_files[-20:])
+            existing["user_id"] = user
+            existing["conversation_id"] = conversation
+            existing["workspace_id"] = conversation
+            existing["deduplicated"] = True
+            existing["message"] = "检测到重复上传，已保留工作区中的原文件。"
+            return existing
+
+        target = workspace_path / "uploads" / f"{Path(safe_name).stem}_{uuid4().hex[:8]}{Path(safe_name).suffix}"
         target.write_bytes(content)
         info = self._file_info(target, workspace_path, original_name=original_name, kind="upload")
+        info = self.file_catalog.register_file(
+            path=target,
+            original_filename=original_name,
+            workspace_id=conversation,
+            user_id=user,
+            project_id=project_id,
+            kind="upload",
+        )
+        processing = self.file_processors.process(
+            target,
+            file_id=info.get("file_id"),
+            user_id=user,
+            conversation_id=conversation,
+        ).to_dict()
+        rag_index = self._index_uploaded_file_for_rag(
+            file_id=str(info.get("file_id") or ""),
+            user_id=user,
+            conversation_id=conversation,
+            processing=processing,
+        )
+        processing["chunks"] = [
+            {
+                "chunk_id": chunk.get("chunk_id"),
+                "page": chunk.get("page"),
+                "section": chunk.get("section"),
+                "token_estimate": chunk.get("token_estimate"),
+            }
+            for chunk in processing.get("chunks", [])
+        ]
+        info["processing"] = processing
+        info["processing_status"] = "success" if processing.get("success") else "failed"
+        info["processing_summary"] = processing.get("summary") or processing.get("error_message") or ""
+        info["rag_index_status"] = rag_index.get("status") or ("failed" if not processing.get("success") else "pending")
+        info["rag_index_error"] = rag_index.get("error_message")
+        info["rag_chunk_count"] = rag_index.get("chunk_count", 0)
+        info["rag_updated_at"] = now_iso()
+        info["user_id"] = user
+        info["conversation_id"] = conversation
+        info["workspace_id"] = conversation
+        info["deduplicated"] = False
         active_files = self.read_active_files(user, conversation)
         active_files = [item for item in active_files if item.get("file_id") != info["file_id"]]
         active_files.append(info)
         self.update_active_files(user, conversation, active_files[-20:])
         return info
 
-    def save_output_file(self, user_id: str | None, conversation_id: str | None, filename: str, content_or_path: Any) -> dict[str, Any]:
+    def _index_uploaded_file_for_rag(self, *, file_id: str, user_id: str, conversation_id: str, processing: dict[str, Any]) -> dict[str, Any]:
+        if not file_id:
+            return {"status": "failed", "error_message": "缺少 file_id。", "chunk_count": 0}
+        if not processing.get("success"):
+            return {"status": "failed", "error_message": processing.get("error_message") or "文件解析失败。", "chunk_count": 0}
+        if not processing.get("chunks"):
+            return {"status": "not_supported", "error_message": "该文件没有可进入文本 RAG 的内容。", "chunk_count": 0}
+        try:
+            from backend.services.rag import RAGService
+
+            return RAGService().index_file(file_id, user_id, conversation_id).to_dict()
+        except Exception as exc:
+            return {"status": "failed", "error_message": f"RAG 索引失败：{exc}", "chunk_count": len(processing.get("chunks") or [])}
+
+    def save_output_file(self, user_id: str | None, conversation_id: str | None, filename: str, content_or_path: Any, project_id: str | None = None) -> dict[str, Any]:
         user, conversation, workspace_path = self._ensure(user_id, conversation_id)
         safe_name = safe_filename(filename, fallback="output")
         target = workspace_path / "outputs" / f"{Path(safe_name).stem}_{uuid4().hex[:8]}{Path(safe_name).suffix}"
@@ -177,7 +271,34 @@ class WorkspaceManager:
             target.write_bytes(content_or_path)
         else:
             target.write_text(str(content_or_path or ""), encoding="utf-8")
-        return self._file_info(target, workspace_path, original_name=filename, kind="output")
+        return self.file_catalog.register_file(
+            path=target,
+            original_filename=filename,
+            workspace_id=conversation,
+            user_id=user,
+            project_id=project_id,
+            kind="output",
+        )
+
+    def register_existing_file(
+        self,
+        user_id: str | None,
+        conversation_id: str | None,
+        path: str | Path,
+        *,
+        original_name: str | None = None,
+        kind: str = "output",
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        user, conversation, _ = self._ensure(user_id, conversation_id)
+        return self.file_catalog.register_file(
+            path=path,
+            original_filename=original_name,
+            workspace_id=conversation,
+            user_id=user,
+            project_id=project_id,
+            kind=kind,
+        )
 
     def append_message(self, user_id: str | None, conversation_id: str | None, role: str, content: str, metadata: dict | None = None) -> dict[str, Any]:
         user, conversation, workspace_path = self._ensure(user_id, conversation_id)
@@ -263,7 +384,7 @@ class WorkspaceManager:
         return {
             "user_id": user,
             "conversation_id": conversation,
-            "workspace_path": str(workspace_path.relative_to(PROJECT_ROOT)),
+            "workspace_path": project_relative_or_display(workspace_path),
             "context_summary": self.read_context_summary(user, conversation),
             "active_files": self.read_active_files(user, conversation),
             "task_state": self.read_task_state(user, conversation),
@@ -272,16 +393,23 @@ class WorkspaceManager:
 
     def _file_info(self, path: Path, workspace_path: Path, original_name: str | None = None, kind: str = "") -> dict[str, Any]:
         stat = path.stat()
-        relative_path = path.relative_to(PROJECT_ROOT)
+        relative_path = project_relative_or_display(path)
+        try:
+            workspace_relative_path = str(path.relative_to(workspace_path)).replace("\\", "/")
+        except ValueError:
+            workspace_relative_path = path.name
         return {
             "file_id": path.stem,
             "filename": path.name,
             "original_name": original_name or path.name,
-            "path": str(relative_path),
-            "workspace_relative_path": str(path.relative_to(workspace_path)),
+            "original_filename": original_name or path.name,
+            "file_type": path.suffix.lower().lstrip(".") or (mimetypes.guess_type(path.name)[0] or "application/octet-stream"),
+            "path": relative_path,
+            "workspace_relative_path": workspace_relative_path,
             "mime_type": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
             "size": stat.st_size,
             "kind": kind,
+            "upload_time": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
             "updated_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
         }
 
