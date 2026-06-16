@@ -36,7 +36,7 @@ class Planner:
             )
 
         if normalized.file_type == "image":
-            image_action = "ocr_extract_text" if any(keyword in normalized.message for keyword in ("文字", "OCR", "提取", "识别")) else "classify_image_type"
+            image_action = self._infer_image_action(normalized.message)
             return AgentPlan(
                 route_type="skill",
                 skill_name="image-understanding",
@@ -194,7 +194,25 @@ class Planner:
                     )
                 try:
                     df = load_table_file(Path(normalized.file_path), preview_only=False).df
+                    if self._is_generic_table_analysis_request(normalized.message):
+                        return AgentPlan(
+                            route_type="skill",
+                            skill_name="table-analysis",
+                            skill_mode="executable",
+                            action_name="summarize_table",
+                            steps=["run_data_analysis_skill", "build_response"],
+                            debug={"table_query_plan": {"action": "summarize_table", "confidence": 0.85, "reason": "泛化表格追问默认返回概览"}},
+                        )
                     query_plan = self.table_query_planner.plan(normalized.message, df)
+                    if query_plan.action == "clarify" and self._is_generic_table_analysis_request(normalized.message):
+                        return AgentPlan(
+                            route_type="skill",
+                            skill_name="table-analysis",
+                            skill_mode="executable",
+                            action_name="summarize_table",
+                            steps=["run_data_analysis_skill", "build_response"],
+                            debug={"table_query_plan": {"action": "summarize_table", "confidence": 0.8, "reason": "泛化表格分析请求默认返回概览"}},
+                        )
                     if query_plan.action not in {"summarize_table", "clarify"}:
                         return AgentPlan(
                             route_type="skill",
@@ -246,3 +264,46 @@ class Planner:
             skill_name=default_skill.name if default_skill else None,
             steps=["legacy_fallback", "build_response"],
         )
+
+    def _is_generic_table_analysis_request(self, message: str) -> bool:
+        text = str(message or "").strip().lower()
+        if not text:
+            return True
+        generic_markers = (
+            "分析这个csv",
+            "分析这个 csv",
+            "分析一下这个csv",
+            "分析一下这个 csv",
+            "分析这个文件",
+            "分析一下这个文件",
+            "看看这个csv",
+            "看看这个 csv",
+            "看看这个文件",
+            "分析这个简介",
+            "分析一下这个简介",
+            "这个简介",
+            "简介",
+            "总结这个csv",
+            "总结这个 csv",
+            "总结这个文件",
+            "主要内容",
+            "内容是什么",
+            "内容总结",
+            "讲的是什么",
+        )
+        return any(marker in text for marker in generic_markers)
+
+    def _infer_image_action(self, message: str) -> str:
+        text = str(message or "")
+        lowered = text.lower()
+        if any(keyword in text for keyword in ("文字", "提取文字", "识别文字", "图片里的文字", "截图内容整理", "翻译图片")) or "ocr" in lowered:
+            return "ocr_extract_text"
+        if any(keyword in text for keyword in ("质量", "清晰", "模糊", "亮度", "对比度", "分辨率")):
+            return "image_quality_check"
+        if any(keyword in text for keyword in ("报错", "错误", "异常", "bug", "界面", "页面", "按钮", "截图", "前端", "后端", "ui")):
+            return "analyze_screenshot"
+        if any(keyword in text for keyword in ("图表", "曲线", "坐标轴", "柱状图", "折线图", "散点图", "论文图", "figure")):
+            return "analyze_chart_or_figure"
+        if any(keyword in lowered for keyword in ("raman", "sers")) or any(keyword in text for keyword in ("拉曼", "光谱", "谱图", "峰位", "峰强")):
+            return "analyze_raman_spectrum_image"
+        return "analyze_general_image"

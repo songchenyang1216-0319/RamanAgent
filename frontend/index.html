@@ -72,6 +72,7 @@
             </div>
           </div>
           <button id="workspaceButton" type="button" class="pill-button">工作区文件</button>
+          <button id="ramanPipelineButton" type="button" class="pill-button">Pipeline</button>
           <button id="knowledgeBaseButton" type="button" class="pill-button">知识库</button>
           <button id="skillsManageBtn" type="button" class="pill-button">Skills 管理</button>
         </div>
@@ -145,6 +146,7 @@
           placeholder="输入问题，或点击 + 上传任意文件"
           rows="1"
         ></textarea>
+        <button id="stopStreamButton" class="send-btn stop-btn hidden" type="button">停止</button>
         <button id="sendButton" class="send-btn" type="button">发送</button>
         <input id="fileInput" type="file" accept="*/*" multiple style="display: none" />
       </div>
@@ -183,6 +185,20 @@
         <button id="closeWorkspacePanelBtn" type="button" class="mini-ghost-button">关闭</button>
       </div>
       <div id="workspacePanelBody" class="workspace-panel-body"></div>
+    </aside>
+  </div>
+
+  <div id="ramanPipelinePanel" class="raman-pipeline-panel hidden" aria-hidden="true">
+    <div id="ramanPipelinePanelBackdrop" class="raman-pipeline-panel-backdrop"></div>
+    <aside class="raman-pipeline-panel-drawer" role="dialog" aria-modal="true" aria-labelledby="ramanPipelinePanelTitle">
+      <div class="raman-pipeline-panel-header">
+        <div>
+          <p class="brand-small brand-small-panel">Raman Pipeline</p>
+          <h2 id="ramanPipelinePanelTitle">光谱 Pipeline Builder</h2>
+        </div>
+        <button id="closeRamanPipelinePanelBtn" type="button" class="mini-ghost-button">关闭</button>
+      </div>
+      <div id="ramanPipelinePanelBody" class="raman-pipeline-panel-body"></div>
     </aside>
   </div>
 

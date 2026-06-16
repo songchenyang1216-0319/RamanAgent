@@ -36,6 +36,73 @@ function buildUrl(path, params = {}) {
   return url.toString();
 }
 
+function buildAgentChatBody({
+  message = "",
+  sessionId = null,
+  userId = "default_user",
+  debug = false,
+  file = null,
+  files = [],
+  fileIds = [],
+  knowledgeBaseIds = [],
+  ragScope = "",
+  metadata = {},
+}) {
+  const selectedFiles = Array.isArray(files) && files.length ? files : (file ? [file] : []);
+  const timeoutMs = Number(metadata.timeoutMs || (selectedFiles.length ? 120000 : 60000));
+  if (selectedFiles.length) {
+    const formData = new FormData();
+    formData.append("message", message || "请分析这个文件");
+    formData.append("user_id", userId || "default_user");
+    formData.append("debug", String(Boolean(debug)));
+    if (selectedFiles.length === 1) {
+      formData.append("file", selectedFiles[0]);
+    } else {
+      selectedFiles.forEach((item) => formData.append("files", item));
+    }
+    (fileIds || []).forEach((item) => formData.append("file_ids", item));
+    (knowledgeBaseIds || []).forEach((item) => formData.append("knowledge_base_ids", item));
+    if (ragScope) {
+      formData.append("rag_scope", ragScope);
+    }
+    if (sessionId) {
+      formData.append("session_id", sessionId);
+      formData.append("conversation_id", sessionId);
+    }
+    if (metadata.providerId) {
+      formData.append("provider_id", metadata.providerId);
+    }
+    if (metadata.modelId) {
+      formData.append("model_id", metadata.modelId);
+    }
+    ["sample_name", "sample_type", "operator", "instrument", "laser_power", "integration_time", "remarks", "remark"].forEach(
+      (field) => {
+        if (metadata[field]) {
+          formData.append(field, metadata[field]);
+        }
+      },
+    );
+    return { body: formData, timeoutMs, isFormData: true };
+  }
+
+  return {
+    body: {
+      message,
+      user_id: userId || "default_user",
+      provider_id: metadata.providerId || undefined,
+      model_id: metadata.modelId || undefined,
+      file_ids: fileIds || undefined,
+      knowledge_base_ids: knowledgeBaseIds || undefined,
+      rag_scope: ragScope || undefined,
+      debug,
+      session_id: sessionId || undefined,
+      conversation_id: sessionId || undefined,
+    },
+    timeoutMs,
+    isFormData: false,
+  };
+}
+
 async function requestJson(path, options = {}) {
   const timeoutMs = Number(options.timeoutMs || 60000);
   const controller = new AbortController();
@@ -155,63 +222,56 @@ export async function sendAgentChat({
   ragScope = "",
   metadata = {},
 }) {
-  const selectedFiles = Array.isArray(files) && files.length ? files : (file ? [file] : []);
-  const timeoutMs = Number(metadata.timeoutMs || (selectedFiles.length ? 120000 : 60000));
-  if (selectedFiles.length) {
-    const formData = new FormData();
-    formData.append("message", message || "请分析这个文件");
-    formData.append("user_id", userId || "default_user");
-    formData.append("debug", String(Boolean(debug)));
-    if (selectedFiles.length === 1) {
-      formData.append("file", selectedFiles[0]);
-    } else {
-      selectedFiles.forEach((item) => formData.append("files", item));
-    }
-    (fileIds || []).forEach((item) => formData.append("file_ids", item));
-    (knowledgeBaseIds || []).forEach((item) => formData.append("knowledge_base_ids", item));
-    if (ragScope) {
-      formData.append("rag_scope", ragScope);
-    }
-    if (sessionId) {
-      formData.append("session_id", sessionId);
-      formData.append("conversation_id", sessionId);
-    }
-    if (metadata.providerId) {
-      formData.append("provider_id", metadata.providerId);
-    }
-    if (metadata.modelId) {
-      formData.append("model_id", metadata.modelId);
-    }
-    ["sample_name", "sample_type", "operator", "instrument", "laser_power", "integration_time", "remarks", "remark"].forEach(
-      (field) => {
-        if (metadata[field]) {
-          formData.append(field, metadata[field]);
-        }
-      }
-    );
+  const { body, timeoutMs, isFormData } = buildAgentChatBody({
+    message,
+    sessionId,
+    userId,
+    debug,
+    file,
+    files,
+    fileIds,
+    knowledgeBaseIds,
+    ragScope,
+    metadata,
+  });
+  if (isFormData) {
     return requestJson("/api/agent/chat", {
       method: "POST",
-      body: formData,
+      body,
       timeoutMs,
     });
   }
 
   return requestJson("/api/agent/chat", {
     method: "POST",
-    body: {
-      message,
-      user_id: userId || "default_user",
-      provider_id: metadata.providerId || undefined,
-      model_id: metadata.modelId || undefined,
-      file_ids: fileIds || undefined,
-      knowledge_base_ids: knowledgeBaseIds || undefined,
-      rag_scope: ragScope || undefined,
-      debug,
-      session_id: sessionId || undefined,
-      conversation_id: sessionId || undefined,
-    },
+    body,
     timeoutMs,
   });
+}
+
+export async function sendAgentChatStream(options = {}, { signal } = {}) {
+  const { body, isFormData } = buildAgentChatBody(options);
+  const headers = isFormData ? {} : { "Content-Type": "application/json" };
+  const token = getAuthToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  const response = await fetch(buildUrl("/api/agent/chat/stream"), {
+    method: "POST",
+    headers: Object.keys(headers).length ? headers : undefined,
+    body: isFormData ? body : JSON.stringify(body),
+    signal,
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const detail = data.detail || {};
+    const detailPayload = typeof detail === "object" && detail !== null ? detail : { error_message: detail };
+    throw new Error(detailPayload.error_message || data.error_message || `流式请求失败: ${response.status}`);
+  }
+  if (!response.body) {
+    throw new Error("当前浏览器不支持 ReadableStream。");
+  }
+  return response;
 }
 
 export async function analyzeFile(file, metadata = {}, sessionId = null) {
@@ -238,6 +298,51 @@ export async function analyzeFile(file, metadata = {}, sessionId = null) {
 
 export async function getCurrentRamanModel() {
   return requestJson("/api/raman-models/current");
+}
+
+export async function getRamanAlgorithms() {
+  return requestJson("/api/raman/algorithms", { timeoutMs: 12000 });
+}
+
+export async function getRamanAlgorithm(algorithmId) {
+  return requestJson(`/api/raman/algorithms/${encodeURIComponent(algorithmId)}`, { timeoutMs: 12000 });
+}
+
+export async function getRamanPipelineTemplates() {
+  return requestJson("/api/raman/pipeline/templates", { timeoutMs: 12000 });
+}
+
+export async function validateRamanPipeline(payload = {}) {
+  return requestJson("/api/raman/pipeline/validate", {
+    method: "POST",
+    body: payload,
+    timeoutMs: 20000,
+  });
+}
+
+export async function runRamanPipeline({ file = null, payload = {} } = {}) {
+  if (file) {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("payload", JSON.stringify(payload || {}));
+    return requestJson("/api/raman/pipeline/run", {
+      method: "POST",
+      body: formData,
+      timeoutMs: 120000,
+    });
+  }
+  return requestJson("/api/raman/pipeline/run", {
+    method: "POST",
+    body: payload,
+    timeoutMs: 120000,
+  });
+}
+
+export async function getRamanPipelineHistory(limit = 30) {
+  return requestJson("/api/raman/pipeline/history", {
+    params: { limit },
+    timeoutMs: 12000,
+  });
 }
 
 export async function checkCurrentModel(modelVersion) {

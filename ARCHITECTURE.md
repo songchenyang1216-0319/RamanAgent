@@ -39,6 +39,19 @@ RamanAgent 不是单一聊天机器人，而是一个保留专业 Raman 分析�
   -> 返回统一 AgentResponse
 ```
 
+流式入口复用同一条编排链路：
+
+```text
+/api/agent/chat/stream
+  -> AgentOrchestrator.handle_chat_stream()
+  -> start/status/planner/tool_* 事件
+  -> execute(plan)
+  -> delta/final/error/done 事件
+  -> text/event-stream
+```
+
+`handle_chat_stream()` 不暴露隐藏推理，只输出用户可见的阶段摘要、工具状态和最终回答。旧 `/api/agent/chat` 保持普通 JSON 响应。
+
 ## 3. 核心分层
 
 ### 3.1 Message Normalizer
@@ -159,13 +172,17 @@ RamanAgent 不是单一聊天机器人，而是一个保留专业 Raman 分析�
 文件：
 
 - [backend/agent/orchestrator.py](./backend/agent/orchestrator.py)
+- [backend/agent/streaming.py](./backend/agent/streaming.py)
+- [backend/schemas/agent_stream.py](./backend/schemas/agent_stream.py)
 
 职责：
 
 - 作为总入口接管 `/api/agent/chat`
+- 作为流式总入口接管 `/api/agent/chat/stream`
 - 串起标准化、意图识别、规划、执行、统一响应
 - 所有分支都有 fallback
 - 任意异常都会被捕获并转成统一响应
+- 通过 `AgentStreamEvent` 输出 `start/status/planner/tool_start/tool_progress/tool_result/delta/final/error/done`
 
 ## 4. 统一响应格式
 
@@ -274,6 +291,38 @@ RamanAgent 不是单一聊天机器人，而是一个保留专业 Raman 分析�
   -> 复用现有 Raman 专业链路
   -> Response Builder
 ```
+
+### 6.4.1 Raman Pipeline 第一阶段
+
+新增的 Raman Pipeline 是独立的可组合算法链，不引入 LLM Planner。它面向前端 Pipeline Builder、API 调用和 Skill action，负责把常见 Raman 算法登记成统一 `AlgorithmSpec`，再按 `PipelineStep` 顺序运行。
+
+```text
+/api/raman/pipeline/run
+  -> PipelineRequest
+  -> AlgorithmRegistry 查询 AlgorithmSpec
+  -> RamanPipelineRunner 顺序执行步骤
+  -> PipelineStepResult 记录 status/shape/metrics/artifacts/warning/error
+  -> PipelineStore 保存 history
+  -> 返回 PipelineResult
+```
+
+与旧链路的关系：
+
+- 旧甲醇预测仍通过 `MethanolPredictor.predict` 和 `RamanSpectroscopySkill.predict_methanol_concentration` 执行。
+- 新 Pipeline 的 `methanol_prediction` 模板只做预测前处理和质量汇总，不在第一阶段替代旧预测模型。
+- 深度学习算法在注册表中作为占位项存在；模型文件缺失或推理适配器未接入时必须 `available=false`。
+
+主要文件：
+
+- `backend/raman_pipeline/algorithm_schema.py`
+- `backend/raman_pipeline/algorithm_registry.py`
+- `backend/raman_pipeline/pipeline_schema.py`
+- `backend/raman_pipeline/pipeline_runner.py`
+- `backend/raman_pipeline/pipeline_store.py`
+- `backend/api/raman_pipeline_api.py`
+- `frontend/index.html`
+- `frontend/app.js`
+- `frontend/style.css`
 
 ### 6.5 联网搜索
 

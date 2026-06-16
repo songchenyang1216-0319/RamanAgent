@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.agent.tools.spectral_tools.spectrum_loader import load_raman_csv
+from raman_core.methanol.config import PROJECT_ROOT
 
 from .base import BaseSkill, SkillResult
 
@@ -61,8 +62,8 @@ class SpectralFileSkill(BaseSkill):
 
     def run(self, **kwargs: Any) -> SkillResult:
         action_name = str(kwargs.get("action_name") or "inspect_spectrum")
-        file_path = str(kwargs.get("file_path") or "").strip()
-        if not file_path:
+        raw_file_path = str(kwargs.get("file_path") or "").strip()
+        if not raw_file_path:
             return SkillResult(
                 success=False,
                 skill_name=self.name,
@@ -70,8 +71,12 @@ class SpectralFileSkill(BaseSkill):
                 summary="未提供 CSV 文件路径。",
                 errors=["缺少 file_path 参数。"],
             )
+        path = Path(raw_file_path).expanduser()
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        file_path = str(path)
 
-        result = load_raman_csv(Path(file_path))
+        result = load_raman_csv(path)
         if not result.get("success"):
             return SkillResult(
                 success=False,

@@ -7,6 +7,7 @@ from typing import Any
 
 from backend.agent.tools.report_tool import explain_result_tool
 from backend.services.model_registry_service import ModelRegistryService
+from raman_core.methanol.config import PROJECT_ROOT
 
 from .base import BaseSkill, SkillResult
 from .raman_methanol_skill import RamanMethanolSkill
@@ -69,7 +70,13 @@ class MethanolAnalysisSkill(BaseSkill):
 
     def run(self, **kwargs: Any) -> SkillResult:
         action_name = str(kwargs.get("action_name") or "predict_methanol_concentration")
-        file_path = str(kwargs.get("file_path") or "").strip()
+        raw_file_path = str(kwargs.get("file_path") or "").strip()
+        file_path = ""
+        if raw_file_path:
+            path = Path(raw_file_path).expanduser()
+            if not path.is_absolute():
+                path = PROJECT_ROOT / path
+            file_path = str(path)
 
         if action_name == "get_model_info":
             result = self._registry_service.get_default_model()

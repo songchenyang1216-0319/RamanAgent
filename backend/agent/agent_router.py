@@ -10,9 +10,11 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from backend.agent.orchestrator import AgentOrchestrator
+from backend.agent.streaming import format_sse
 from backend.agent.agent_service import RamanAgentService
 from backend.agent.tools.report_tool import explain_result_tool, generate_report_tool
 from backend.agent.tools.spectral_tools.spectral_summary_tool import analyze_spectrum_professionally
@@ -287,18 +289,46 @@ def _workspace_input_files(user_id: str, conversation_id: str, save_path: Path |
 
 def _resolve_referenced_active_file(user_id: str, conversation_id: str, message: str) -> tuple[Path, dict] | None:
     text = str(message or "")
-    if not any(marker in text for marker in ("刚才", "上次", "那个文件", "这个文件", "继续")):
+    if not _message_mentions_file_context(text):
         return None
     active_files = workspace_manager.read_active_files(user_id, conversation_id)
     if not active_files:
         return None
-    for item in reversed(active_files):
-        path = PROJECT_ROOT / str(item.get("path") or "")
+
+    lowered = text.lower()
+    suffix_preferences: list[str] = []
+    if "csv" in lowered or "表格" in text:
+        suffix_preferences.extend([".csv", ".xlsx", ".xls"])
+    if "excel" in lowered or "xlsx" in lowered or "xls" in lowered:
+        suffix_preferences.extend([".xlsx", ".xls", ".csv"])
+    if any(marker in text for marker in ("文档", "报告", "doc", "pdf", "word")):
+        suffix_preferences.extend([".docx", ".doc", ".pdf", ".txt", ".md"])
+
+    ordered_files = list(reversed(active_files))
+    if suffix_preferences:
+        preferred = []
+        rest = []
+        for item in ordered_files:
+            name = str(item.get("filename") or item.get("original_filename") or item.get("path") or "")
+            suffix = Path(name).suffix.lower()
+            if suffix in suffix_preferences:
+                preferred.append(item)
+            else:
+                rest.append(item)
+        ordered_files = preferred + rest
+
+    for item in ordered_files:
+        raw_path = str(item.get("path") or item.get("file_path") or "").strip()
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
         try:
             resolved = path.resolve()
         except Exception:
             continue
-        if PROJECT_ROOT.resolve() in resolved.parents and resolved.exists() and resolved.is_file():
+        if resolved.exists() and resolved.is_file():
             return resolved, item
     return None
 
@@ -308,13 +338,30 @@ def _message_mentions_file_context(message: str) -> bool:
     markers = (
         "刚才",
         "上次",
+        "它",
+        "他",
+        "其",
         "那个文件",
+        "那个csv",
+        "那个 csv",
+        "那个表格",
         "这个文件",
+        "这个csv",
+        "这个 csv",
+        "这个表格",
         "当前文件",
         "上一个文件",
+        "csv文件",
+        "csv 文件",
+        "excel文件",
+        "excel 文件",
+        "主要内容",
+        "内容是什么",
+        "内容总结",
         "继续处理",
         "继续分析",
         "总结这个",
+        "总结一下",
         "分析这个",
         "处理这个",
         "转换这个",
@@ -1785,6 +1832,242 @@ def clear_session(session_id: str) -> dict:
     payload["success"] = True
     payload["message"] = "当前会话记忆已清空。"
     return payload
+
+
+async def _prepare_chat_orchestrator_payload(request: Request) -> dict[str, object]:
+    content_type = (request.headers.get("content-type") or "").lower()
+    message = ""
+    conversation_id = None
+    user_id = DEFAULT_USER_ID
+    debug = False
+    uploaded_file = None
+    uploaded_files: list[UploadFile] = []
+    file_ids: list[str] = []
+    knowledge_base_ids: list[str] = []
+    rag_scope: str | None = None
+    metadata: dict[str, str | None] = {}
+    provider_id: str | None = None
+    model_id: str | None = None
+
+    if "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+        form = await request.form()
+        message = str(form.get("message") or "").strip()
+        conversation_id = str(form.get("conversation_id") or form.get("session_id") or "").strip() or None
+        user_id = str(form.get("user_id") or DEFAULT_USER_ID).strip() or DEFAULT_USER_ID
+        provider_id = str(form.get("provider_id") or "").strip() or None
+        model_id = str(form.get("model_id") or "").strip() or None
+        debug = _as_bool(form.get("debug"))
+        uploaded_file = form.get("file")
+        uploaded_files = _dedupe_uploaded_files([uploaded_file, *list(form.getlist("files") or [])])
+        file_ids = _normalize_string_list(form.get("file_ids") or form.getlist("file_ids"))
+        knowledge_base_ids = _normalize_string_list(form.get("knowledge_base_ids") or form.getlist("knowledge_base_ids"))
+        rag_scope = str(form.get("rag_scope") or "").strip() or None
+        metadata = {
+            "sample_name": str(form.get("sample_name") or "").strip() or None,
+            "sample_type": str(form.get("sample_type") or "").strip() or None,
+            "operator": str(form.get("operator") or "").strip() or None,
+            "instrument": str(form.get("instrument") or "").strip() or None,
+            "laser_power": str(form.get("laser_power") or "").strip() or None,
+            "integration_time": str(form.get("integration_time") or "").strip() or None,
+            "remarks": str(form.get("remark") or form.get("remarks") or "").strip() or None,
+        }
+    else:
+        payload = await request.json()
+        message = str(payload.get("message") or "").strip()
+        conversation_id = payload.get("conversation_id") or payload.get("session_id")
+        user_id = str(payload.get("user_id") or DEFAULT_USER_ID).strip() or DEFAULT_USER_ID
+        provider_id = str(payload.get("provider_id") or "").strip() or None
+        model_id = str(payload.get("model_id") or "").strip() or None
+        debug = bool(payload.get("debug", False))
+        file_ids = _normalize_string_list(payload.get("file_ids"))
+        knowledge_base_ids = _normalize_string_list(payload.get("knowledge_base_ids"))
+        rag_scope = str(payload.get("rag_scope") or "").strip() or None
+
+    resolved_session_id = _ensure_session_id(str(conversation_id).strip() if conversation_id else None)
+    resolved_conversation_id = resolved_session_id
+    workspace = workspace_manager.create_workspace(user_id, resolved_session_id)
+    resolved_user_id = workspace["user_id"]
+    update_session(resolved_session_id, "user_id", resolved_user_id)
+    effective_message = message or "请分析这个文件"
+    memory_note = _extract_memory_note(effective_message)
+    if memory_note:
+        user_memory_manager.remember_note(resolved_user_id, memory_note)
+    user_memory = user_memory_manager.get_user_memory(resolved_user_id)
+    workspace_manager.update_memory_snapshot(resolved_user_id, resolved_session_id, user_memory)
+    workspace_context = workspace_manager.read_workspace_context(resolved_user_id, resolved_session_id)
+    workspace_manager.append_message(
+        resolved_user_id,
+        resolved_session_id,
+        "user",
+        effective_message,
+        metadata={
+            "debug": debug,
+            "has_file": bool(uploaded_files or file_ids),
+            "file_ids": file_ids,
+            "knowledge_base_ids": knowledge_base_ids,
+            "context_summary_chars": len(workspace_context.get("context_summary") or ""),
+            "conversation_id": resolved_conversation_id,
+        },
+    )
+    append_message(resolved_session_id, "user", effective_message)
+
+    orchestrator_payload: dict[str, object] = {
+        "message": effective_message,
+        "conversation_id": resolved_session_id,
+        "session_id": resolved_session_id,
+        "user_id": resolved_user_id,
+        "provider_id": provider_id,
+        "model_id": model_id,
+        "debug": debug,
+        "metadata": metadata,
+        "explicit_has_file": bool(uploaded_files or file_ids),
+        "file_ids": list(file_ids),
+        "knowledge_base_ids": list(knowledge_base_ids),
+        "rag_scope": rag_scope,
+    }
+    selected_files: list[dict] = []
+    if uploaded_files:
+        for item in uploaded_files:
+            try:
+                info = await workspace_manager.save_upload_file(resolved_user_id, resolved_session_id, item)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            selected_files.append(info)
+        orchestrator_payload["files"] = selected_files
+        orchestrator_payload["file_ids"] = [str(item.get("file_id")) for item in selected_files if item.get("file_id")]
+        first_path = PROJECT_ROOT / str(selected_files[0].get("path") or "")
+        orchestrator_payload["file_path"] = str(first_path)
+        orchestrator_payload["file_name"] = str(selected_files[0].get("filename") or first_path.name)
+    elif file_ids:
+        selected_files = file_catalog.get_files_by_ids(file_ids, user_id=resolved_user_id, is_admin=False)
+        if selected_files:
+            orchestrator_payload["files"] = selected_files
+            first_path = PROJECT_ROOT / str(selected_files[0].get("path") or "")
+            orchestrator_payload["file_path"] = str(first_path)
+            orchestrator_payload["file_name"] = str(selected_files[0].get("filename") or first_path.name)
+    else:
+        if _message_mentions_file_context(effective_message) and any(marker in effective_message for marker in ("这些文件", "这些文档", "这几个文件", "所有文件", "全部文件", "刚才这些", "刚才那些")):
+            active_files = workspace_manager.read_active_files(resolved_user_id, resolved_session_id)[-5:]
+            selected_files = list(active_files or [])
+            if selected_files:
+                orchestrator_payload["files"] = selected_files
+                orchestrator_payload["file_ids"] = [str(item.get("file_id")) for item in selected_files if item.get("file_id")]
+                first_path = PROJECT_ROOT / str(selected_files[0].get("path") or "")
+                orchestrator_payload["file_path"] = str(first_path)
+                orchestrator_payload["file_name"] = str(selected_files[0].get("filename") or first_path.name)
+        referenced_active_file = None if selected_files else _resolve_referenced_active_file(resolved_user_id, resolved_session_id, effective_message)
+        if referenced_active_file is not None:
+            save_path, active_item = referenced_active_file
+            selected_files = [active_item]
+            orchestrator_payload["files"] = selected_files
+            if active_item.get("file_id"):
+                orchestrator_payload["file_ids"] = [str(active_item.get("file_id"))]
+            orchestrator_payload["file_path"] = str(save_path)
+            orchestrator_payload["file_name"] = save_path.name
+        else:
+            session = get_session(resolved_session_id) or {}
+            last_file = str(session.get("last_file") or "").strip()
+            if last_file and _message_mentions_file_context(effective_message):
+                candidate = Path(last_file)
+                if not candidate.is_absolute():
+                    candidate = PROJECT_ROOT / candidate
+                try:
+                    resolved_candidate = candidate.resolve()
+                except Exception:
+                    resolved_candidate = candidate
+                if resolved_candidate.exists() and resolved_candidate.is_file():
+                    orchestrator_payload["file_path"] = str(resolved_candidate)
+                    orchestrator_payload["file_name"] = resolved_candidate.name
+
+    return {
+        "payload": orchestrator_payload,
+        "selected_files": selected_files,
+        "effective_message": effective_message,
+        "resolved_user_id": resolved_user_id,
+        "resolved_session_id": resolved_session_id,
+    }
+
+
+def _persist_stream_chat_response(
+    response_payload: dict,
+    *,
+    orchestrator_payload: dict[str, object],
+    selected_files: list[dict],
+    resolved_user_id: str,
+    resolved_session_id: str,
+    effective_message: str,
+) -> dict:
+    assistant_reply = (
+        response_payload.get("reply")
+        or response_payload.get("llm_explanation")
+        or response_payload.get("error_message")
+        or "处理完成。"
+    )
+    append_message(resolved_session_id, "assistant", assistant_reply)
+    finalized = _finalize_workspace_response(
+        response_payload,
+        user_id=resolved_user_id,
+        conversation_id=resolved_session_id,
+        user_message=effective_message,
+        assistant_reply=assistant_reply,
+        task_id=response_payload.get("task_id"),
+    )
+    _apply_task_state_from_response(resolved_session_id, finalized)
+    session_patch = {"last_analysis": _build_session_analysis_payload(finalized, resolved_session_id)}
+    file_path_value = str(orchestrator_payload.get("file_path") or "").strip()
+    if file_path_value:
+        try:
+            session_patch["last_file"] = str(Path(file_path_value).relative_to(PROJECT_ROOT))
+        except Exception:
+            session_patch["last_file"] = file_path_value
+    if selected_files:
+        session_patch["last_files"] = selected_files[-20:]
+    for key, value in session_patch.items():
+        update_session(resolved_session_id, key, value)
+    return finalized
+
+
+@router.post("/chat/stream")
+async def chat_stream(request: Request) -> StreamingResponse:
+    """统一聊天流式入口，支持 JSON 和 FormData。"""
+    prepared = await _prepare_chat_orchestrator_payload(request)
+    orchestrator_payload = dict(prepared["payload"])
+    selected_files = list(prepared["selected_files"] or [])
+    effective_message = str(prepared["effective_message"])
+    resolved_user_id = str(prepared["resolved_user_id"])
+    resolved_session_id = str(prepared["resolved_session_id"])
+
+    async def event_generator():
+        async for event in orchestrator.handle_chat_stream(orchestrator_payload):
+            if event.event == "final":
+                response_payload = dict((event.data or {}).get("response") or {})
+                if response_payload:
+                    finalized = _persist_stream_chat_response(
+                        response_payload,
+                        orchestrator_payload=orchestrator_payload,
+                        selected_files=selected_files,
+                        resolved_user_id=resolved_user_id,
+                        resolved_session_id=resolved_session_id,
+                        effective_message=effective_message,
+                    )
+                    event.data["response"] = finalized
+                    event.content = (
+                        finalized.get("reply")
+                        or finalized.get("llm_explanation")
+                        or finalized.get("error_message")
+                        or event.content
+                    )
+            yield format_sse(event)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/chat")

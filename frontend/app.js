@@ -17,6 +17,9 @@ import {
   getConversationMessages,
   getFiles,
   getCurrentLlmModel,
+  getRamanAlgorithms,
+  getRamanPipelineHistory,
+  getRamanPipelineTemplates,
   getModelProviders,
   getProjects,
   getReports,
@@ -36,16 +39,19 @@ import {
   deleteSkill as requestDeleteSkill,
   logoutUser,
   sendAgentChat,
+  sendAgentChatStream,
   setAuthToken,
   setActionEnabled as requestSetActionEnabled,
   setSkillEnabled as requestSetSkillEnabled,
   switchLlmModel,
   refreshLlmModels,
+  runRamanPipeline,
   toAssetUrl,
   registerUser,
   runFileOcr,
   uploadWorkspaceFile,
   uploadSkillZip as requestUploadSkillZip,
+  validateRamanPipeline,
 } from "./js/api.js";
 import { initConversationSidebar } from "./js/sidebar.js";
 import { renderArtifacts } from "./js/artifact-renderer.js";
@@ -74,6 +80,9 @@ const state = {
   expandedSkillNames: new Set(),
   chatBusy: false,
   typingNode: null,
+  streamAbortController: null,
+  activeStreamNode: null,
+  useStreaming: true,
   initialized: false,
   modelListOpen: false,
   uploadingSkill: false,
@@ -89,6 +98,12 @@ const state = {
   selectedBatchFileIds: new Set(),
   conversationSidebar: null,
   knowledgeBasePanel: null,
+  ramanPipelineOpen: false,
+  ramanPipelinePayload: { algorithms: [], templates: [], history: [] },
+  ramanPipelineSteps: [],
+  selectedPipelineTemplate: "basic_preprocessing",
+  ramanPipelineResult: null,
+  ramanPipelineBusy: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -456,10 +471,15 @@ function scrollToBottom() {
 function setBusy(isBusy, hint = "正在处理中...") {
   state.chatBusy = isBusy;
   const sendButton = $("sendButton");
+  const stopStreamButton = $("stopStreamButton");
   const fileButton = $("fileButton");
   const messageInput = $("messageInput");
   if (sendButton) {
     sendButton.disabled = isBusy;
+  }
+  if (stopStreamButton) {
+    stopStreamButton.classList.toggle("hidden", !isBusy || !state.streamAbortController);
+    stopStreamButton.disabled = !isBusy || !state.streamAbortController;
   }
   if (fileButton) {
     fileButton.disabled = isBusy;
@@ -490,6 +510,230 @@ function appendMessage(role, html, type = "text", meta = buildNowText()) {
   container.appendChild(row);
   scrollToBottom();
   return row;
+}
+
+function appendStreamingAssistantMessage() {
+  const row = appendMessage(
+    "assistant",
+    `
+      <div class="agent-stream-card">
+        <details class="agent-stream-thinking" data-stream-thinking open>
+          <summary class="agent-stream-thinking-summary" data-stream-thinking-summary>正在分析问题...</summary>
+          <div class="agent-trace" data-stream-trace></div>
+        </details>
+        <div class="assistant-stream-answer markdown-body" data-stream-answer>
+          <span class="muted-text">正在等待响应...</span>
+        </div>
+      </div>
+    `,
+    "text",
+    "流式处理中",
+  );
+  const context = {
+    row,
+    thinkingNode: row?.querySelector("[data-stream-thinking]") || null,
+    thinkingSummaryNode: row?.querySelector("[data-stream-thinking-summary]") || null,
+    traceNode: row?.querySelector("[data-stream-trace]") || null,
+    answerNode: row?.querySelector("[data-stream-answer]") || null,
+    answerText: "",
+    finalResponse: null,
+    receivedAnyEvent: false,
+    receivedFinal: false,
+  };
+  state.activeStreamNode = row;
+  return context;
+}
+
+function updateStreamThinkingSummary(streamContext, text = "") {
+  if (!streamContext?.thinkingSummaryNode) {
+    return;
+  }
+  streamContext.thinkingSummaryNode.textContent = text || "查看处理过程";
+}
+
+function finalizeStreamThinking(streamContext, eventPayload = {}) {
+  if (!streamContext?.thinkingNode) {
+    return;
+  }
+  const elapsedMs = Number(eventPayload?.data?.elapsed_ms || 0);
+  updateStreamThinkingSummary(
+    streamContext,
+    elapsedMs > 0 ? `已处理 ${formatDurationMs(elapsedMs)}，查看过程` : "已完成，查看过程",
+  );
+  streamContext.thinkingNode.open = false;
+}
+
+function getStreamTraceText(eventName, eventPayload = {}) {
+  const content = String(eventPayload.content || summarizeStreamEventData(eventPayload.data) || "").trim();
+  const data = eventPayload.data || {};
+  const route = String(data.route_type || data.route || "").trim();
+  const skillName = String(data.skill_name || "").trim();
+  const toolName = String(data.tool_name || "").trim();
+  const actionName = String(data.action_name || "").trim();
+  if (eventName === "final") {
+    return "已生成最终答复。";
+  }
+  if (eventName === "done") {
+    return "本次处理已结束。";
+  }
+  if (eventName === "error") {
+    return content || "处理过程中出现错误。";
+  }
+  if (eventName === "start") {
+    return "我已收到你的消息，开始整理请求。";
+  }
+  if (eventName === "status") {
+    return content || "我正在推进当前步骤。";
+  }
+  if (eventName === "planner") {
+    return content || "我正在判断这次该走哪条处理路径。";
+  }
+  if (eventName === "tool_start") {
+    const target = [skillName ? `Skill ${skillName}` : "", toolName ? `工具 ${toolName}` : "", actionName ? `动作 ${actionName}` : ""]
+      .filter(Boolean)
+      .join("，");
+    return target ? `我准备调用${target}。` : (content || "我准备调用合适的工具。");
+  }
+  if (eventName === "tool_progress") {
+    return content || "工具正在处理中。";
+  }
+  if (eventName === "tool_result") {
+    return content || "工具已经执行完成。";
+  }
+  return content || (route ? `当前处理路径：${route}。` : "处理中。");
+}
+
+function appendStreamTrace(streamContext, eventPayload = {}) {
+  const traceNode = streamContext?.traceNode;
+  if (!traceNode || eventPayload.visible === false) {
+    return;
+  }
+  const eventName = String(eventPayload.event || "status");
+  if (eventName === "delta") {
+    return;
+  }
+  updateStreamThinkingSummary(streamContext, "正在分析问题...");
+  const item = document.createElement("div");
+  item.className = `trace-item trace-${eventName}`;
+  item.textContent = getStreamTraceText(eventName, eventPayload);
+  traceNode.appendChild(item);
+  scrollToBottom();
+}
+
+function summarizeStreamEventData(data = {}) {
+  if (!data || typeof data !== "object") {
+    return "";
+  }
+  if (data.route) return `路径：${data.route}`;
+  if (data.plan_type) return `计划：${data.plan_type}`;
+  if (data.tool_name || data.action_name) return [data.tool_name, data.action_name].filter(Boolean).join(".");
+  if (data.algorithm_id) return `算法：${data.algorithm_id}`;
+  return "";
+}
+
+function appendStreamAnswer(streamContext, chunk = "") {
+  if (!streamContext?.answerNode || !chunk) {
+    return;
+  }
+  streamContext.answerText += chunk;
+  streamContext.answerNode.innerHTML = renderMarkdown(streamContext.answerText || "");
+  scrollToBottom();
+}
+
+function replaceStreamAnswer(streamContext, text = "") {
+  if (!streamContext?.answerNode) {
+    return;
+  }
+  streamContext.answerText = text;
+  streamContext.answerNode.innerHTML = renderMarkdown(text || "");
+  scrollToBottom();
+}
+
+function parseSseMessage(rawMessage) {
+  const lines = String(rawMessage || "").split(/\r?\n/);
+  let eventName = "";
+  const dataLines = [];
+  lines.forEach((line) => {
+    if (line.startsWith("event:")) {
+      eventName = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+  });
+  const dataText = dataLines.join("\n").trim();
+  if (!dataText) {
+    return null;
+  }
+  const payload = JSON.parse(dataText);
+  if (eventName && !payload.event) {
+    payload.event = eventName;
+  }
+  return payload;
+}
+
+async function readSseStream(response, onEvent) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const messages = buffer.split(/\n\n|\r\n\r\n/);
+    buffer = messages.pop() || "";
+    for (const message of messages) {
+      const payload = parseSseMessage(message);
+      if (payload) {
+        onEvent(payload);
+      }
+    }
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    const payload = parseSseMessage(buffer);
+    if (payload) {
+      onEvent(payload);
+    }
+  }
+}
+
+function handleStreamEvent(streamContext, eventPayload) {
+  if (!streamContext || !eventPayload) {
+    return;
+  }
+  streamContext.receivedAnyEvent = true;
+  const eventName = String(eventPayload.event || "");
+  if (eventPayload.conversation_id || eventPayload.session_id) {
+    state.sessionId = eventPayload.conversation_id || eventPayload.session_id;
+    persistSessionId(state.sessionId);
+  }
+  if (eventName === "delta") {
+    appendStreamAnswer(streamContext, eventPayload.content || "");
+    return;
+  }
+  if (eventName === "final") {
+    streamContext.receivedFinal = true;
+    streamContext.finalResponse = eventPayload.data?.response || null;
+    const finalText = eventPayload.content || streamContext.finalResponse?.reply || streamContext.finalResponse?.llm_explanation || streamContext.finalResponse?.error_message || streamContext.answerText;
+    if (finalText && finalText !== streamContext.answerText) {
+      replaceStreamAnswer(streamContext, finalText);
+    }
+    appendStreamTrace(streamContext, eventPayload);
+    finalizeStreamThinking(streamContext, eventPayload);
+    return;
+  }
+  if (eventName === "error") {
+    const errorText = eventPayload.content || "流式处理失败。";
+    if (!streamContext.answerText) {
+      streamContext.answerNode.innerHTML = `<p class="error-message">${escapeHtml(errorText)}</p>`;
+    }
+    appendStreamTrace(streamContext, eventPayload);
+    updateStreamThinkingSummary(streamContext, "处理失败，查看过程");
+    return;
+  }
+  appendStreamTrace(streamContext, eventPayload);
 }
 
 function escapeOrFallback(value, fallback = "") {
@@ -2154,6 +2398,7 @@ function bindComposerEvents() {
   const fileButton = $("fileButton");
   const fileInput = $("fileInput");
   const sendButton = $("sendButton");
+  const stopStreamButton = $("stopStreamButton");
   const messageInput = $("messageInput");
 
   if (!fileButton) {
@@ -2181,6 +2426,15 @@ function bindComposerEvents() {
     });
   }
 
+  if (stopStreamButton) {
+    stopStreamButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      if (state.streamAbortController) {
+        state.streamAbortController.abort();
+      }
+    });
+  }
+
   if (messageInput) {
     messageInput.addEventListener("input", autoResizeTextarea);
     messageInput.addEventListener("keydown", (event) => {
@@ -2190,6 +2444,388 @@ function bindComposerEvents() {
       }
     });
   }
+}
+
+function getPipelineAlgorithmMap() {
+  const algorithms = Array.isArray(state.ramanPipelinePayload.algorithms) ? state.ramanPipelinePayload.algorithms : [];
+  return new Map(algorithms.map((item) => [item.algorithm_id, item]));
+}
+
+function clonePipelineSteps(steps = []) {
+  return (Array.isArray(steps) ? steps : []).map((step) => ({
+    algorithm_id: String(step.algorithm_id || ""),
+    params: { ...(step.params || {}) },
+  })).filter((step) => step.algorithm_id);
+}
+
+function applyPipelineTemplate(templateId) {
+  const templates = Array.isArray(state.ramanPipelinePayload.templates) ? state.ramanPipelinePayload.templates : [];
+  const template = templates.find((item) => item.template_id === templateId);
+  if (!template) {
+    return;
+  }
+  state.selectedPipelineTemplate = templateId;
+  state.ramanPipelineSteps = clonePipelineSteps(template.steps || []);
+  state.ramanPipelineResult = null;
+}
+
+async function loadRamanPipelineData() {
+  const [algorithmsResponse, templatesResponse, historyResponse] = await Promise.all([
+    getRamanAlgorithms(),
+    getRamanPipelineTemplates(),
+    getRamanPipelineHistory(12),
+  ]);
+  if (!algorithmsResponse.success) {
+    throw new Error(algorithmsResponse.error_message || "算法库加载失败");
+  }
+  if (!templatesResponse.success) {
+    throw new Error(templatesResponse.error_message || "模板加载失败");
+  }
+  state.ramanPipelinePayload = {
+    algorithms: Array.isArray(algorithmsResponse.algorithms) ? algorithmsResponse.algorithms : [],
+    templates: Array.isArray(templatesResponse.templates) ? templatesResponse.templates : [],
+    history: Array.isArray(historyResponse.history) ? historyResponse.history : [],
+  };
+  if (!state.ramanPipelineSteps.length) {
+    applyPipelineTemplate(state.selectedPipelineTemplate || state.ramanPipelinePayload.templates[0]?.template_id || "");
+  }
+}
+
+function renderAlgorithmLibrary() {
+  const algorithms = Array.isArray(state.ramanPipelinePayload.algorithms) ? state.ramanPipelinePayload.algorithms : [];
+  if (!algorithms.length) {
+    return `<div class="pipeline-empty">算法库还没有加载。</div>`;
+  }
+  const groups = algorithms.reduce((acc, algorithm) => {
+    const key = algorithm.category || "未分类";
+    acc[key] = acc[key] || [];
+    acc[key].push(algorithm);
+    return acc;
+  }, {});
+  return Object.entries(groups).map(([category, items]) => `
+    <section class="pipeline-library-group">
+      <h3>${escapeHtml(category)}</h3>
+      <div class="pipeline-algorithm-list">
+        ${items.map((algorithm) => `
+          <article class="pipeline-algorithm-item ${algorithm.available ? "" : "unavailable"}">
+            <div>
+              <strong>${escapeHtml(algorithm.display_name || algorithm.algorithm_id)}</strong>
+              <span>${escapeHtml(algorithm.algorithm_id)}</span>
+              <p>${escapeHtml(algorithm.description || "")}</p>
+              ${algorithm.available ? "" : `<div class="pipeline-warning">${escapeHtml(algorithm.unavailable_reason || "当前不可用")}</div>`}
+            </div>
+            <button class="mini-ghost-button" type="button" data-add-pipeline-algorithm="${escapeHtml(algorithm.algorithm_id)}" ${algorithm.available ? "" : "disabled"}>添加</button>
+          </article>
+        `).join("")}
+      </div>
+    </section>
+  `).join("");
+}
+
+function renderPipelineSteps() {
+  const algorithmMap = getPipelineAlgorithmMap();
+  const steps = Array.isArray(state.ramanPipelineSteps) ? state.ramanPipelineSteps : [];
+  if (!steps.length) {
+    return `<div class="pipeline-empty">还没有步骤。可以选择模板，或从算法库添加算法。</div>`;
+  }
+  return steps.map((step, index) => {
+    const algorithm = algorithmMap.get(step.algorithm_id) || {};
+    const paramsText = JSON.stringify(step.params || {}, null, 2);
+    return `
+      <article class="pipeline-step-card" data-step-index="${index}" data-algorithm-id="${escapeHtml(step.algorithm_id)}">
+        <div class="pipeline-step-head">
+          <div>
+            <span>步骤 ${index + 1}</span>
+            <strong>${escapeHtml(algorithm.display_name || step.algorithm_id)}</strong>
+            <small>${escapeHtml(step.algorithm_id)}</small>
+          </div>
+          <div class="inline-actions">
+            <button class="mini-ghost-button" type="button" data-move-pipeline-step="${index}" data-direction="-1">上移</button>
+            <button class="mini-ghost-button" type="button" data-move-pipeline-step="${index}" data-direction="1">下移</button>
+            <button class="mini-ghost-button" type="button" data-remove-pipeline-step="${index}">移除</button>
+          </div>
+        </div>
+        <label class="pipeline-param-editor">
+          <span>参数 JSON</span>
+          <textarea class="form-textarea" data-pipeline-step-params="${index}" rows="4">${escapeHtml(paramsText)}</textarea>
+        </label>
+      </article>
+    `;
+  }).join("");
+}
+
+function renderPipelineResult() {
+  const result = state.ramanPipelineResult;
+  if (!result) {
+    return `<div class="pipeline-empty">运行后会在这里显示每一步状态、图谱、warning 和 error。</div>`;
+  }
+  const steps = Array.isArray(result.steps) ? result.steps : [];
+  const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+  const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
+  const images = artifacts.filter((item) => item.type === "image" && item.url);
+  const tables = artifacts.filter((item) => item.type === "table");
+  return `
+    <div class="pipeline-result-summary ${result.success ? "success" : "failed"}">
+      <strong>${escapeHtml(result.message || (result.success ? "运行完成" : "运行失败"))}</strong>
+      <span>Run ID：${escapeHtml(result.run_id || "")} · 耗时：${escapeHtml(formatDurationMs(result.elapsed_ms) || "")}</span>
+      ${result.error_message ? `<div class="pipeline-error">${escapeHtml(result.error_message)}</div>` : ""}
+    </div>
+    ${warnings.length ? `<div class="pipeline-warning">${warnings.map(escapeHtml).join("；")}</div>` : ""}
+    <div class="pipeline-step-result-list">
+      ${steps.map((step) => `
+        <article class="pipeline-step-result ${step.status === "success" ? "success" : "failed"}">
+          <div>
+            <strong>${escapeHtml(step.display_name || step.algorithm_id)}</strong>
+            <span>${escapeHtml(step.status || "")} · ${escapeHtml(formatDurationMs(step.elapsed_ms) || "")} · 输入 ${escapeHtml(String(step.input_shape?.points ?? 0))} 点 / 输出 ${escapeHtml(String(step.output_shape?.points ?? 0))} 点</span>
+          </div>
+          ${step.warning ? `<div class="pipeline-warning">${escapeHtml(step.warning)}</div>` : ""}
+          ${step.error_message ? `<div class="pipeline-error">${escapeHtml(step.error_message)}</div>` : ""}
+        </article>
+      `).join("")}
+    </div>
+    ${images.length ? `
+      <div class="pipeline-figure-grid">
+        ${images.map((image) => `
+          <figure class="pipeline-figure">
+            <img src="${escapeHtml(toAssetUrl(image.url))}" alt="${escapeHtml(image.title || "Pipeline 图谱")}" />
+            <figcaption>${escapeHtml(image.title || "")}</figcaption>
+          </figure>
+        `).join("")}
+      </div>
+    ` : ""}
+    ${tables.length ? `
+      <div class="pipeline-table-list">
+        ${tables.map((table) => `
+          <details class="pipeline-table-card">
+            <summary>${escapeHtml(table.title || "表格")} · ${escapeHtml(String((table.rows || []).length))} 行预览</summary>
+            <pre>${escapeHtml(JSON.stringify(table.rows || [], null, 2))}</pre>
+          </details>
+        `).join("")}
+      </div>
+    ` : ""}
+  `;
+}
+
+function renderPipelineHistory() {
+  const history = Array.isArray(state.ramanPipelinePayload.history) ? state.ramanPipelinePayload.history : [];
+  if (!history.length) {
+    return `<div class="pipeline-empty">暂无运行历史。</div>`;
+  }
+  return history.slice(0, 8).map((item) => `
+    <article class="pipeline-history-item ${item.success ? "success" : "failed"}">
+      <strong>${escapeHtml(item.template_id || "custom_pipeline")}</strong>
+      <span>${escapeHtml(item.created_at || "")} · ${escapeHtml(item.run_id || "")} · ${escapeHtml(item.success ? "成功" : "失败")}</span>
+    </article>
+  `).join("");
+}
+
+function readPipelineStepsFromDom() {
+  const cards = Array.from(document.querySelectorAll(".pipeline-step-card"));
+  const steps = [];
+  for (const card of cards) {
+    const index = Number(card.dataset.stepIndex || 0);
+    const algorithmId = card.dataset.algorithmId || state.ramanPipelineSteps[index]?.algorithm_id || "";
+    const textarea = card.querySelector(`[data-pipeline-step-params="${index}"]`);
+    let params = {};
+    try {
+      params = textarea?.value?.trim() ? JSON.parse(textarea.value) : {};
+    } catch {
+      showToast(`第 ${index + 1} 步参数 JSON 不合法`, "error");
+      return null;
+    }
+    steps.push({ algorithm_id: algorithmId, params });
+  }
+  state.ramanPipelineSteps = clonePipelineSteps(steps);
+  return state.ramanPipelineSteps;
+}
+
+function bindRamanPipelinePanelEvents() {
+  const body = $("ramanPipelinePanelBody");
+  if (!body) {
+    return;
+  }
+  $("pipelineTemplateSelect")?.addEventListener("change", (event) => {
+    state.selectedPipelineTemplate = event.target?.value || "";
+  });
+  $("applyPipelineTemplateBtn")?.addEventListener("click", () => {
+    applyPipelineTemplate($("pipelineTemplateSelect")?.value || state.selectedPipelineTemplate);
+    renderRamanPipelinePanel();
+  });
+  $("clearPipelineStepsBtn")?.addEventListener("click", () => {
+    state.ramanPipelineSteps = [];
+    state.ramanPipelineResult = null;
+    renderRamanPipelinePanel();
+  });
+  $("validatePipelineBtn")?.addEventListener("click", async () => {
+    const steps = readPipelineStepsFromDom();
+    if (!steps) {
+      return;
+    }
+    const response = await validateRamanPipeline({ steps, template_id: state.selectedPipelineTemplate || undefined, save_history: false });
+    state.ramanPipelineResult = {
+      success: response.success,
+      message: response.success ? "Pipeline 校验通过。" : "Pipeline 校验未通过。",
+      run_id: "validate",
+      elapsed_ms: 0,
+      steps: steps.map((step) => ({
+        display_name: getPipelineAlgorithmMap().get(step.algorithm_id)?.display_name || step.algorithm_id,
+        algorithm_id: step.algorithm_id,
+        status: response.errors?.length ? "failed" : "success",
+        input_shape: {},
+        output_shape: {},
+      })),
+      warnings: response.warnings || [],
+      error_message: (response.errors || []).join("；"),
+      artifacts: [],
+    };
+    renderRamanPipelinePanel();
+  });
+  $("runPipelineBtn")?.addEventListener("click", async () => {
+    const file = $("pipelineFileInput")?.files?.[0] || null;
+    if (!file) {
+      showToast("请先选择一个 Raman CSV 文件", "error");
+      return;
+    }
+    const steps = readPipelineStepsFromDom();
+    if (!steps) {
+      return;
+    }
+    state.ramanPipelineBusy = true;
+    renderRamanPipelinePanel();
+    const response = await runRamanPipeline({
+      file,
+      payload: {
+        template_id: state.selectedPipelineTemplate || undefined,
+        steps,
+        sample_name: file.name,
+        save_history: true,
+      },
+    });
+    state.ramanPipelineBusy = false;
+    state.ramanPipelineResult = response.success === false && !response.steps
+      ? {
+          success: false,
+          message: "Raman Pipeline 运行失败。",
+          run_id: "",
+          elapsed_ms: 0,
+          steps: [],
+          artifacts: [],
+          warnings: [],
+          error_message: response.error_message || response.message || "运行失败",
+        }
+      : response;
+    const historyResponse = await getRamanPipelineHistory(12);
+    state.ramanPipelinePayload.history = Array.isArray(historyResponse.history) ? historyResponse.history : state.ramanPipelinePayload.history;
+    renderRamanPipelinePanel();
+  });
+  body.querySelectorAll("[data-add-pipeline-algorithm]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const algorithmId = button.dataset.addPipelineAlgorithm || "";
+      const algorithm = getPipelineAlgorithmMap().get(algorithmId);
+      state.ramanPipelineSteps.push({ algorithm_id: algorithmId, params: { ...(algorithm?.default_params || {}) } });
+      renderRamanPipelinePanel();
+    });
+  });
+  body.querySelectorAll("[data-remove-pipeline-step]").forEach((button) => {
+    button.addEventListener("click", () => {
+      readPipelineStepsFromDom();
+      state.ramanPipelineSteps.splice(Number(button.dataset.removePipelineStep || 0), 1);
+      renderRamanPipelinePanel();
+    });
+  });
+  body.querySelectorAll("[data-move-pipeline-step]").forEach((button) => {
+    button.addEventListener("click", () => {
+      readPipelineStepsFromDom();
+      const index = Number(button.dataset.movePipelineStep || 0);
+      const direction = Number(button.dataset.direction || 0);
+      const target = index + direction;
+      if (target < 0 || target >= state.ramanPipelineSteps.length) {
+        return;
+      }
+      const [item] = state.ramanPipelineSteps.splice(index, 1);
+      state.ramanPipelineSteps.splice(target, 0, item);
+      renderRamanPipelinePanel();
+    });
+  });
+}
+
+function renderRamanPipelinePanel() {
+  const body = $("ramanPipelinePanelBody");
+  if (!body) {
+    return;
+  }
+  const templates = Array.isArray(state.ramanPipelinePayload.templates) ? state.ramanPipelinePayload.templates : [];
+  body.innerHTML = `
+    <div class="pipeline-toolbar">
+      <label class="pipeline-template-select">
+        <span>模板</span>
+        <select id="pipelineTemplateSelect" class="form-select">
+          ${templates.map((template) => `<option value="${escapeHtml(template.template_id)}" ${template.template_id === state.selectedPipelineTemplate ? "selected" : ""}>${escapeHtml(template.display_name || template.template_id)}</option>`).join("")}
+        </select>
+      </label>
+      <input id="pipelineFileInput" class="form-input" type="file" accept=".csv,text/csv" />
+      <button id="applyPipelineTemplateBtn" class="pill-button small" type="button">套用模板</button>
+      <button id="validatePipelineBtn" class="pill-button small ghost" type="button">校验</button>
+      <button id="runPipelineBtn" class="pill-button small" type="button" ${state.ramanPipelineBusy ? "disabled" : ""}>${state.ramanPipelineBusy ? "运行中..." : "运行"}</button>
+      <button id="clearPipelineStepsBtn" class="pill-button small ghost" type="button">清空步骤</button>
+    </div>
+    <div class="pipeline-builder-grid">
+      <section class="pipeline-panel-section">
+        <div class="pipeline-section-head">
+          <h3>算法库</h3>
+          <span>${escapeHtml(String(state.ramanPipelinePayload.algorithms?.length || 0))} 个</span>
+        </div>
+        <div class="pipeline-library">${renderAlgorithmLibrary()}</div>
+      </section>
+      <section class="pipeline-panel-section">
+        <div class="pipeline-section-head">
+          <h3>Pipeline 步骤</h3>
+          <span>${escapeHtml(String(state.ramanPipelineSteps.length))} 步</span>
+        </div>
+        <div class="pipeline-steps">${renderPipelineSteps()}</div>
+      </section>
+    </div>
+    <section class="pipeline-panel-section">
+      <div class="pipeline-section-head">
+        <h3>运行结果</h3>
+        <span>状态 / 中间图 / warning / error</span>
+      </div>
+      <div class="pipeline-result">${renderPipelineResult()}</div>
+    </section>
+    <section class="pipeline-panel-section">
+      <div class="pipeline-section-head">
+        <h3>历史记录</h3>
+        <span>最近 8 条</span>
+      </div>
+      <div class="pipeline-history">${renderPipelineHistory()}</div>
+    </section>
+  `;
+  bindRamanPipelinePanelEvents();
+}
+
+async function openRamanPipelinePanel() {
+  state.ramanPipelineOpen = true;
+  $("ramanPipelinePanel")?.classList.remove("hidden");
+  $("ramanPipelinePanel")?.setAttribute("aria-hidden", "false");
+  const body = $("ramanPipelinePanelBody");
+  if (body) {
+    body.innerHTML = `<div class="pipeline-empty">正在加载 Raman Pipeline...</div>`;
+  }
+  try {
+    await loadRamanPipelineData();
+    renderRamanPipelinePanel();
+  } catch (error) {
+    console.error("加载 Raman Pipeline 失败：", error);
+    if (body) {
+      body.innerHTML = `<div class="pipeline-error">加载失败：${escapeHtml(error.message || "未知错误")}</div>`;
+    }
+  }
+}
+
+function closeRamanPipelinePanel() {
+  state.ramanPipelineOpen = false;
+  $("ramanPipelinePanel")?.classList.add("hidden");
+  $("ramanPipelinePanel")?.setAttribute("aria-hidden", "true");
 }
 
 function bindPageEvents() {
@@ -2203,6 +2839,9 @@ function bindPageEvents() {
   $("workspaceButton")?.addEventListener("click", openWorkspacePanel);
   $("closeWorkspacePanelBtn")?.addEventListener("click", closeWorkspacePanel);
   $("workspacePanelBackdrop")?.addEventListener("click", closeWorkspacePanel);
+  $("ramanPipelineButton")?.addEventListener("click", openRamanPipelinePanel);
+  $("closeRamanPipelinePanelBtn")?.addEventListener("click", closeRamanPipelinePanel);
+  $("ramanPipelinePanelBackdrop")?.addEventListener("click", closeRamanPipelinePanel);
 
   $("modelListBtn")?.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -2235,6 +2874,7 @@ function bindPageEvents() {
     if (event.key === "Escape") {
       closeSkillsPanel();
       closeWorkspacePanel();
+      closeRamanPipelinePanel();
       state.knowledgeBasePanel?.close();
       closeModelList();
     }
@@ -2946,6 +3586,131 @@ function bindPhase2Events() {
   $("refreshReportsBtn")?.addEventListener("click", loadPhase2Data);
 }
 
+function buildChatRequestOptions(message, selectedFiles, timeoutMs) {
+  const currentLlm = state.llmModelsPayload.current || {};
+  return {
+    message,
+    sessionId: state.sessionId || "",
+    userId: state.userId,
+    debug: false,
+    files: selectedFiles,
+    metadata: {
+      remarks: "",
+      timeoutMs,
+      providerId: currentLlm.provider_id || undefined,
+      modelId: currentLlm.model_id || undefined,
+    },
+  };
+}
+
+function applyChatResponseSideEffects(response, { renderResponse = true } = {}) {
+  if (response.conversation_id || response.session_id) {
+    state.sessionId = response.conversation_id || response.session_id;
+    persistSessionId(state.sessionId);
+  }
+
+  const treatAsSuccess = response.success === true || (response.reply && !response.error_message);
+  if (!treatAsSuccess) {
+    console.error("发送消息失败：", response);
+    if (renderResponse) {
+      const friendlyMessage = escapeHtml(formatResponseError(response));
+      appendMessage("assistant", `<p class="error-message">${friendlyMessage}</p>`, "error");
+    }
+    return false;
+  }
+
+  if (renderResponse) {
+    renderAssistantResponse(response);
+  }
+  const responseModelInfo = response.model_info || response.llm_model_info || {};
+  const usedProviderId = response.provider_id || responseModelInfo.provider || responseModelInfo.provider_id;
+  const usedModelId = response.model_id || responseModelInfo.model || responseModelInfo.model_id;
+  const usedProviderName = responseModelInfo.provider_display_name || responseModelInfo.provider_name || usedProviderId;
+  if (usedProviderId && usedModelId) {
+    state.llmModelsPayload.current = {
+      ...(state.llmModelsPayload.current || {}),
+      provider_id: usedProviderId,
+      provider_name: usedProviderName,
+      model_id: usedModelId,
+      model_name: responseModelInfo.model_display_name || responseModelInfo.model_name || usedModelId,
+    };
+    $("topLlmModel").textContent = `${usedProviderName || "未知平台"} / ${usedModelId}`;
+  }
+  state.selectedFile = null;
+  state.selectedFiles = [];
+  const fileInput = $("fileInput");
+  if (fileInput) {
+    fileInput.value = "";
+  }
+  renderSelectedFileChip([]);
+  const input = $("messageInput");
+  if (input) {
+    input.value = "";
+  }
+  autoResizeTextarea();
+  loadRamanStatusSafely();
+  if (state.workspaceOpen) {
+    refreshWorkspacePanel();
+  }
+  if (state.knowledgeBasePanel?.isOpen?.()) {
+    state.knowledgeBasePanel.refresh();
+  }
+  state.conversationSidebar?.refreshConversations();
+  return true;
+}
+
+async function sendChatMessageStreaming(requestOptions) {
+  const controller = new AbortController();
+  state.streamAbortController = controller;
+  setBusy(true, requestOptions.files?.length ? "正在上传文件并流式分析..." : "正在流式生成...");
+  const streamContext = appendStreamingAssistantMessage();
+  try {
+    const response = await sendAgentChatStream(requestOptions, { signal: controller.signal });
+    await readSseStream(response, (eventPayload) => handleStreamEvent(streamContext, eventPayload));
+    if (!streamContext.receivedFinal) {
+      throw new Error("流式响应没有返回 final 事件。");
+    }
+    return streamContext.finalResponse || {
+      success: true,
+      reply: streamContext.answerText || "处理完成。",
+      conversation_id: state.sessionId,
+      session_id: state.sessionId,
+    };
+  } catch (error) {
+    if (error.name === "AbortError") {
+      appendStreamTrace(streamContext, { event: "done", content: "已停止生成。" });
+      if (!streamContext.answerText) {
+        replaceStreamAnswer(streamContext, "已停止生成。");
+      }
+      return {
+        success: true,
+        reply: streamContext.answerText || "已停止生成。",
+        conversation_id: state.sessionId,
+        session_id: state.sessionId,
+        stopped: true,
+      };
+    }
+    if (!streamContext.receivedAnyEvent) {
+      streamContext.row?.remove();
+      throw error;
+    }
+    appendStreamTrace(streamContext, { event: "error", content: error.message || "流式响应中断。" });
+    if (!streamContext.answerText) {
+      replaceStreamAnswer(streamContext, error.message || "流式响应中断。");
+    }
+    return {
+      success: false,
+      error_message: error.message || "流式响应中断。",
+      reply: streamContext.answerText,
+      conversation_id: state.sessionId,
+      session_id: state.sessionId,
+    };
+  } finally {
+    state.streamAbortController = null;
+    setBusy(false);
+  }
+}
+
 async function sendChatMessage(presetMessage = "") {
   if (state.chatBusy) {
     return;
@@ -2970,77 +3735,31 @@ async function sendChatMessage(presetMessage = "") {
     autoResizeTextarea();
   }
 
-  setBusy(true, selectedFile ? "正在上传文件并分析..." : "正在思考...");
-  renderTypingMessage(selectedFile ? "正在分析文件内容，可能需要几十秒，请稍候..." : "正在处理，请稍候...");
+  const requestOptions = buildChatRequestOptions(message, selectedFiles, timeoutMs);
 
   try {
     const requestStartedAt = performance.now();
-    const currentLlm = state.llmModelsPayload.current || {};
-    const response = await sendAgentChat({
-      message,
-      sessionId: state.sessionId || "",
-      userId: state.userId,
-      debug: false,
-      files: selectedFiles,
-      metadata: {
-        remarks: "",
-        timeoutMs,
-        providerId: currentLlm.provider_id || undefined,
-        modelId: currentLlm.model_id || undefined,
-      },
-    });
+    if (state.useStreaming) {
+      try {
+        const streamedResponse = await sendChatMessageStreaming(requestOptions);
+        streamedResponse.client_elapsed_ms = Math.round(performance.now() - requestStartedAt);
+        applyChatResponseSideEffects(streamedResponse, { renderResponse: false });
+        return;
+      } catch (streamError) {
+        console.warn("流式请求失败，回退普通聊天接口：", streamError);
+        showToast("流式响应不可用，已回退普通响应。", "info");
+      }
+    }
+
+    setBusy(true, selectedFile ? "正在上传文件并分析..." : "正在思考...");
+    renderTypingMessage(selectedFile ? "正在分析文件内容，可能需要几十秒，请稍候..." : "正在处理，请稍候...");
+    const response = await sendAgentChat(requestOptions);
     response.client_elapsed_ms = Math.round(performance.now() - requestStartedAt);
 
     removeTypingMessage();
     setBusy(false);
 
-    if (response.conversation_id || response.session_id) {
-      state.sessionId = response.conversation_id || response.session_id;
-      persistSessionId(state.sessionId);
-    }
-
-    const treatAsSuccess = response.success === true || (response.reply && !response.error_message);
-    if (!treatAsSuccess) {
-      console.error("发送消息失败：", response);
-      const friendlyMessage = escapeHtml(formatResponseError(response));
-      appendMessage("assistant", `<p class="error-message">${friendlyMessage}</p>`, "error");
-      return;
-    }
-
-    renderAssistantResponse(response);
-    const responseModelInfo = response.model_info || response.llm_model_info || {};
-    const usedProviderId = response.provider_id || responseModelInfo.provider || responseModelInfo.provider_id;
-    const usedModelId = response.model_id || responseModelInfo.model || responseModelInfo.model_id;
-    const usedProviderName = responseModelInfo.provider_display_name || responseModelInfo.provider_name || usedProviderId;
-    if (usedProviderId && usedModelId) {
-      state.llmModelsPayload.current = {
-        ...(state.llmModelsPayload.current || {}),
-        provider_id: usedProviderId,
-        provider_name: usedProviderName,
-        model_id: usedModelId,
-        model_name: responseModelInfo.model_display_name || responseModelInfo.model_name || usedModelId,
-      };
-      $("topLlmModel").textContent = `${usedProviderName || "未知平台"} / ${usedModelId}`;
-    }
-    state.selectedFile = null;
-    state.selectedFiles = [];
-    const fileInput = $("fileInput");
-    if (fileInput) {
-      fileInput.value = "";
-    }
-    renderSelectedFileChip([]);
-    if (input) {
-      input.value = "";
-    }
-    autoResizeTextarea();
-    loadRamanStatusSafely();
-    if (state.workspaceOpen) {
-      refreshWorkspacePanel();
-    }
-    if (state.knowledgeBasePanel?.isOpen?.()) {
-      state.knowledgeBasePanel.refresh();
-    }
-    state.conversationSidebar?.refreshConversations();
+    applyChatResponseSideEffects(response, { renderResponse: true });
   } catch (error) {
     removeTypingMessage();
     setBusy(false);

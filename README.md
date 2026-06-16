@@ -18,6 +18,7 @@ RamanAgent 正在向通用 Agent 形态演进，当前同时保留 Raman 光谱�
 - CAE+ 基线估计
 - SVR / RF 预测
 - RamanAgent 对话
+- 流式对话与 Agent 执行状态可视化
 - 大模型平台与模型切换
 - 历史记录
 - 报告生成
@@ -27,6 +28,7 @@ RamanAgent 正在向通用 Agent 形态演进，当前同时保留 Raman 光谱�
 - 知识库前端 CRUD、上传、绑定、重建索引
 - OCR 可选 provider 与扫描件处理入口
 - 文件转换与 PDF fallback 策略
+- Raman Pipeline Builder：算法注册表、内置模板、自定义光谱处理链、步骤图谱和运行历史
 
 ## 项目结构
 
@@ -144,6 +146,7 @@ http://127.0.0.1:8000/app/index.html
 常用接口包括：
 
 - `POST /api/agent/chat`
+- `POST /api/agent/chat/stream`
 - `POST /api/agent/analyze-file`
 - `POST /api/files/upload`
 - `POST /api/files/{file_id}/ocr`
@@ -159,6 +162,12 @@ http://127.0.0.1:8000/app/index.html
 - `DELETE /api/conversations/{conversation_id}/knowledge-bases/{knowledge_base_id}`
 - `GET /api/rag/health`
 - `POST /api/rag/rebuild-all`
+- `GET /api/raman/algorithms`
+- `GET /api/raman/algorithms/{algorithm_id}`
+- `GET /api/raman/pipeline/templates`
+- `POST /api/raman/pipeline/validate`
+- `POST /api/raman/pipeline/run`
+- `GET /api/raman/pipeline/history`
 - `GET /api/tasks/{task_id}`
 - `GET /api/conversations/{conversation_id}/tasks`
 - `GET /api/conversations/{conversation_id}/messages`
@@ -170,6 +179,40 @@ http://127.0.0.1:8000/app/index.html
 - `GET /api/raman-models`
 - `GET /api/raman-models/current`
 - `POST /api/methanol/predict-report`
+
+## Raman Pipeline
+
+新增的 Raman Pipeline 第一阶段提供可组合算法链，不替代旧甲醇预测主入口。用户可以在前端 `Pipeline` 面板中选择模板、添加算法、编辑参数 JSON、上传 CSV 后运行，并查看每一步状态、warning/error、中间图和最终图。
+
+内置模板包括：
+
+- `basic_preprocessing`
+- `quality_check`
+- `methanol_prediction`
+- `peak_analysis`
+- `deep_learning_placeholder`
+- `ml_compare`
+
+当前 ready 算法覆盖读取校验、波数轴、平滑、基线、归一化、峰检测、质量控制、基础特征提取和经典机器学习回归器。深度学习项为占位算法，模型文件缺失或推理适配器未接入时会标记 `available=false`，不会假装执行成功。
+
+更多说明见 [docs/raman_pipeline.md](./docs/raman_pipeline.md) 和 [docs/algorithm_catalog.md](./docs/algorithm_catalog.md)。
+
+## 流式对话
+
+前端默认优先调用 `POST /api/agent/chat/stream`，通过 `fetch + ReadableStream` 读取 SSE 事件；如果流式接口不可用，会自动回退旧的 `POST /api/agent/chat`。旧接口保持兼容。
+
+流式事件包括：
+
+- `start`：请求已进入 Agent。
+- `status`：消息整理、意图判断等可见状态。
+- `planner`：规则路由、增强 Planner 或旧 Planner 的公开摘要。
+- `tool_start` / `tool_progress` / `tool_result`：工具、Skill、Raman Pipeline 执行状态。
+- `delta`：助手回答增量。
+- `final`：最终统一响应。
+- `error`：用户可理解的错误。
+- `done`：流结束。
+
+更多说明见 [docs/streaming_chat.md](./docs/streaming_chat.md)。
 
 ## Workspace 与任务追踪
 

@@ -9,6 +9,7 @@ import warnings
 
 import pandas as pd
 from pandas.api.types import is_datetime64_any_dtype, is_numeric_dtype
+from raman_core.methanol.config import PROJECT_ROOT
 
 from .base import BaseSkill, SkillResult
 from .table_query_planner import TableFilter, TableQueryPlan, TableQueryPlanner, build_table_schema, normalize_filter_value
@@ -18,6 +19,8 @@ TABLE_FILE_SUFFIXES = {".csv", ".xlsx", ".xls"}
 CSV_ENCODINGS = ("utf-8", "utf-8-sig", "gbk", "gb18030")
 PREVIEW_ROWS = 20
 MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024
+ZIP_SIGNATURE = b"PK\x03\x04"
+OLE_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 RAMAN_TABLE_HINTS = (
     "raman",
     "sers",
@@ -140,6 +143,19 @@ def _normalize_name(value: object) -> str:
     return " ".join(str(value or "").strip().lower().replace("_", " ").split())
 
 
+def _detect_table_container(path: Path) -> str:
+    try:
+        with path.open("rb") as handle:
+            signature = handle.read(8)
+    except OSError:
+        return "unknown"
+    if signature.startswith(ZIP_SIGNATURE):
+        return "xlsx"
+    if signature.startswith(OLE_SIGNATURE):
+        return "xls"
+    return "text"
+
+
 def detect_raman_table_signal(file_path: str | Path | None) -> dict[str, Any]:
     path = Path(str(file_path or "")).expanduser()
     if not path.exists() or not path.is_file() or not is_supported_table_suffix(path.suffix):
@@ -166,6 +182,8 @@ def detect_raman_table_signal(file_path: str | Path | None) -> dict[str, Any]:
 
 def load_table_file(file_path: str | Path, preview_only: bool = False) -> TableLoadResult:
     path = Path(str(file_path)).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
     if not path.exists():
         raise FileNotFoundError("文件不存在。")
     suffix = path.suffix.lower()
@@ -174,17 +192,28 @@ def load_table_file(file_path: str | Path, preview_only: bool = False) -> TableL
     if path.stat().st_size > MAX_FILE_SIZE_BYTES:
         raise ValueError("文件过大，当前仅支持 25MB 以内的表格文件。")
 
+    detected_container = _detect_table_container(path)
+    warnings_list: list[str] = []
+    if suffix == ".csv" and detected_container in {"xlsx", "xls"}:
+        warnings_list.append(
+            f"文件扩展名是 .csv，但实际内容是 Excel {detected_container.upper()} 格式，已自动按 Excel 读取。"
+        )
+        suffix = f".{detected_container}"
+    elif suffix in {".xlsx", ".xls"} and detected_container == "text":
+        warnings_list.append("文件扩展名是 Excel，但实际内容更像文本 CSV，已自动按 CSV 读取。")
+        suffix = ".csv"
+
     if suffix == ".csv":
         last_error = ""
         for encoding in CSV_ENCODINGS:
             try:
                 df = pd.read_csv(path, encoding=encoding, nrows=PREVIEW_ROWS if preview_only else None)
-                return TableLoadResult(df=df, table_type="csv", encoding=encoding, sheet_name=None, sheet_names=[], warnings=[])
+                return TableLoadResult(df=df, table_type="csv", encoding=encoding, sheet_name=None, sheet_names=[], warnings=warnings_list)
             except UnicodeDecodeError as exc:
                 last_error = str(exc)
                 continue
             except pd.errors.EmptyDataError:
-                return TableLoadResult(df=pd.DataFrame(), table_type="csv", encoding=encoding, sheet_name=None, sheet_names=[], warnings=["表格为空。"])
+                return TableLoadResult(df=pd.DataFrame(), table_type="csv", encoding=encoding, sheet_name=None, sheet_names=[], warnings=[*warnings_list, "表格为空。"])
             except Exception as exc:
                 last_error = str(exc)
                 continue
@@ -200,7 +229,6 @@ def load_table_file(file_path: str | Path, preview_only: bool = False) -> TableL
     try:
         excel_file = pd.ExcelFile(path, engine=engine)
         sheet_names = list(excel_file.sheet_names or [])
-        warnings_list: list[str] = []
         if not sheet_names:
             return TableLoadResult(df=pd.DataFrame(), table_type="excel", encoding=None, sheet_name=None, sheet_names=[], warnings=["Excel 文件中没有可读取的工作表。"])
         sheet_name = sheet_names[0]
@@ -306,7 +334,11 @@ class DataAnalysisSkill(BaseSkill):
 
         aliased_action = ACTION_ALIASES.get(requested_action, requested_action)
         if aliased_action in {"clarify", "summarize_table", "query_table", "count_records", "groupby_count", "groupby_statistics", "top_n", "sort_table"} and message:
+            if requested_action == "summarize_table" and self._looks_like_generic_summary_request(message):
+                return TableQueryPlan(action="summarize_table", confidence=0.85, reason="泛化表格追问默认返回概览")
             plan = self.planner.plan(message, df)
+            if requested_action == "summarize_table" and plan.need_clarification:
+                return TableQueryPlan(action="summarize_table", confidence=0.8, reason="泛化表格分析请求默认返回概览")
             if requested_action == "summarize_table" and plan.action == "summarize_table":
                 return plan
             if requested_action in {"simple_query_table", "summarize_table"}:
@@ -332,6 +364,27 @@ class DataAnalysisSkill(BaseSkill):
                 return TableQueryPlan(action="groupby_count", confidence=0.75, group_by=categorical[0], limit=PREVIEW_ROWS, reason="兼容旧类别汇总动作")
             return self.planner.plan(message, df)
         return TableQueryPlan(action=aliased_action or "summarize_table", confidence=0.7, reason="按显式 action 执行")
+
+    def _looks_like_generic_summary_request(self, message: str) -> bool:
+        text = str(message or "").strip().lower()
+        markers = (
+            "分析这个csv",
+            "分析这个 csv",
+            "分析这个文件",
+            "分析这个简介",
+            "分析一下这个简介",
+            "这个简介",
+            "简介",
+            "总结这个csv",
+            "总结这个 csv",
+            "总结这个文件",
+            "总结一下",
+            "主要内容",
+            "内容是什么",
+            "内容总结",
+            "讲的是什么",
+        )
+        return any(marker in text for marker in markers)
 
     def _execute_plan(self, plan: TableQueryPlan, df: pd.DataFrame, metadata: dict[str, Any]) -> SkillResult:
         action = plan.action

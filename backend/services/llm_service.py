@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import Any, Iterable
 
 from backend.agent.prompts.general_chat_prompt import (
     build_general_chat_local_reply,
@@ -12,6 +12,7 @@ from backend.agent.prompts.general_chat_prompt import (
 )
 from backend.core.model_registry import _looks_like_placeholder_secret
 from backend.core.model_router import ModelRouter
+from backend.agent.streaming import split_text_for_stream
 from backend.services.user_memory_manager import UserMemoryManager
 from backend.services.workspace_manager import WorkspaceManager
 from dotenv import load_dotenv
@@ -193,6 +194,53 @@ class LLMService:
         raw = response.model_dump() if hasattr(response, "model_dump") else None
         return (content or "").strip(), raw
 
+    def _chat_complete_stream(self, system_prompt: str, user_prompt: str) -> Iterable[str]:
+        """优先使用 OpenAI-compatible stream=True，调用失败由上层回退旧接口。"""
+        if self.provider != "ollama" and not self.has_real_api_key:
+            raise RuntimeError(self.import_error_message or f"未配置 {self.api_key_env or 'API_KEY'}")
+        if self.import_error_message:
+            raise RuntimeError(self.import_error_message)
+        if self.client is None:
+            raise RuntimeError("大模型客户端未成功初始化")
+
+        response, _ = self.model_router.chat(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            provider_id=self.provider,
+            model_id=self.model,
+            stream=True,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            timeout_seconds=self.timeout_seconds,
+        )
+        for chunk in response:
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            delta = getattr(choices[0], "delta", None)
+            content = getattr(delta, "content", None) if delta is not None else None
+            if content:
+                yield str(content)
+
+    def _build_general_reply_prompts(self, message: str, system_context: dict | None = None) -> tuple[str, str, dict[str, Any]]:
+        model_context = self.build_model_context(system_context)
+        system_prompt = build_general_chat_system_prompt(model_context)
+        user_prompt = (
+            "请根据下面这条用户消息进行自然对话。"
+            "如果问题涉及真实系统状态、实验记录、模型文件、最近一次分析结果等你无法直接知道的内容，"
+            "请明确说明需要通过系统工具查询，不要编造。\n\n"
+            f"用户消息：{message}"
+        )
+        if model_context.get("recent_messages") or model_context.get("conversation_summary") or model_context.get("user_memory"):
+            user_prompt += (
+                "\n\n# 可用上下文摘要\n"
+                f"{model_context}"
+                "\n\n请只把这些上下文当作辅助记忆；如果上下文不足，请直接说明。"
+            )
+        return system_prompt, user_prompt, model_context
+
     def build_model_context(self, extra_context: dict | None = None) -> dict[str, Any]:
         """Build bounded context for normal chat and skill explanations."""
         context: dict[str, Any] = dict(extra_context or {})
@@ -277,20 +325,7 @@ class LLMService:
 
     def generate_general_reply(self, message: str, system_context: dict | None = None) -> dict:
         """生成通用对话回复，失败时返回降级内容。"""
-        model_context = self.build_model_context(system_context)
-        system_prompt = build_general_chat_system_prompt(model_context)
-        user_prompt = (
-            "请根据下面这条用户消息进行自然对话。"
-            "如果问题涉及真实系统状态、实验记录、模型文件、最近一次分析结果等你无法直接知道的内容，"
-            "请明确说明需要通过系统工具查询，不要编造。\n\n"
-            f"用户消息：{message}"
-        )
-        if model_context.get("recent_messages") or model_context.get("conversation_summary") or model_context.get("user_memory"):
-            user_prompt += (
-                "\n\n# 可用上下文摘要\n"
-                f"{model_context}"
-                "\n\n请只把这些上下文当作辅助记忆；如果上下文不足，请直接说明。"
-            )
+        system_prompt, user_prompt, _model_context = self._build_general_reply_prompts(message, system_context)
         try:
             reply, raw = self._chat_complete(system_prompt, user_prompt)
             if not reply:
@@ -326,6 +361,56 @@ class LLMService:
                 "raw_response": None,
                 "model_info": self.get_current_model_info(),
             }
+
+    def generate_general_reply_stream(self, message: str, system_context: dict | None = None) -> Iterable[dict[str, Any]]:
+        """生成通用对话流。
+
+        输出事件字典：
+        - {"event": "delta", "content": "..."}
+        - {"event": "final", "result": {...}}
+
+        当 provider 不支持或无法使用 stream=True 时，自动调用旧的
+        generate_general_reply，再把完整回复切成小片段。
+        """
+        if self.default_stream:
+            try:
+                system_prompt, user_prompt, _model_context = self._build_general_reply_prompts(message, system_context)
+                chunks: list[str] = []
+                for chunk in self._chat_complete_stream(system_prompt, user_prompt):
+                    chunks.append(chunk)
+                    yield {"event": "delta", "content": chunk}
+                reply = "".join(chunks).strip()
+                if reply:
+                    yield {
+                        "event": "final",
+                        "result": {
+                            "success": True,
+                            "reply": reply,
+                            "error_message": None,
+                            "raw_response": None,
+                            "model_info": self.get_current_model_info(),
+                            "stream_mode": "provider",
+                        },
+                    }
+                    return
+                logger.warning("LLM stream returned empty content, fallback to simulated stream.")
+            except Exception as exc:
+                logger.warning(
+                    "LLM stream failed, fallback to simulated stream: provider=%s model=%s error_type=%s error=%s",
+                    self.get_provider_info().get("provider_label"),
+                    self.model,
+                    type(exc).__name__,
+                    exc,
+                )
+
+        result = self.generate_general_reply(message, system_context=system_context)
+        for chunk in split_text_for_stream(str(result.get("reply") or "")):
+            yield {"event": "delta", "content": chunk}
+        result = dict(result)
+        result["stream_mode"] = "simulated"
+        yield {"event": "final", "result": result}
+
+    stream_general_reply = generate_general_reply_stream
 
     def generate_skill_augmented_reply(
         self,

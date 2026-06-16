@@ -83,7 +83,14 @@
         "predict_methanol_concentration": true,
         "explain_prediction": true,
         "get_model_info": true,
-        "generate_markdown_report": true
+        "generate_markdown_report": true,
+        "list_algorithms": true,
+        "validate_pipeline": true,
+        "run_custom_pipeline": true,
+        "run_template_pipeline": true,
+        "list_pipeline_templates": true,
+        "get_pipeline_history": true,
+        "compare_pipelines": true
       }
     },
     "image-router-skill": {

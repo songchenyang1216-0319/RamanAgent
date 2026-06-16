@@ -12,6 +12,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from backend.core.model_registry import ModelRegistry
 from backend.core.model_router import ModelRouter
 from backend.services.llm_service import LLMService
+from raman_core.methanol.config import PROJECT_ROOT
 
 from .base import BaseSkill, SkillResult
 
@@ -62,6 +63,8 @@ class ImageRouterSkill(BaseSkill):
     def run(self, **kwargs: Any) -> SkillResult:
         action_name = str(kwargs.get("action_name") or "classify_image_type")
         image_path = Path(str(kwargs.get("file_path") or "")).expanduser()
+        if not image_path.is_absolute():
+            image_path = PROJECT_ROOT / image_path
         message = str(kwargs.get("message") or kwargs.get("original_message") or "").strip()
         action_enabled_map = dict(kwargs.get("action_enabled_map") or {})
 

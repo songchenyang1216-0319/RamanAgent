@@ -167,7 +167,9 @@ class DocumentReaderSkill(BaseSkill):
                 data={"reply_text": reply, "multi_file": True, "file_count": len(file_paths), "files": items, "skill_mode": "executable"},
                 errors=errors,
             )
-        path = Path(str(kwargs.get("file_path") or ""))
+        path = Path(str(kwargs.get("file_path") or "")).expanduser()
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
         action_name = str(kwargs.get("action_name") or "summarize")
         user_id = str(kwargs.get("user_id") or "default_user")
         conversation_id = str(kwargs.get("conversation_id") or kwargs.get("session_id") or "")

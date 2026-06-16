@@ -12,14 +12,14 @@ DEFAULT_LIMIT = 20
 MAX_SAMPLE_VALUES = 10
 
 COUNT_KEYWORDS = ("有多少条", "几条", "多少记录", "记录数", "数量是多少", "有多少行", "count", "number of records")
-QUERY_KEYWORDS = ("列出来", "显示", "筛选", "找出", "查看这些记录", "哪些记录", "都列出来", "显示出来", "筛选出来")
+QUERY_KEYWORDS = ("列出来", "显示", "筛选", "找出", "查看这些记录", "哪些记录", "都列出来", "显示出来", "筛选出来", "给我", "给我看", "我要", "取出", "返回", "筛出来")
 GROUPBY_COUNT_KEYWORDS = ("每个", "各个", "分别", "分布")
 DISTINCT_VALUE_KEYWORDS = ("有哪些", "有什么", "有啥", "都有哪些", "包括哪些", "包含哪些")
 GROUPBY_STAT_KEYWORDS = ("总和", "合计", "平均", "均值", "最大", "最小", "中位数", "sum", "mean", "avg", "max", "min", "median")
 MISSING_VALUE_KEYWORDS = ("缺失值", "空值", "为空", "检查空值")
 VISUALIZE_KEYWORDS = ("画图", "可视化", "柱状图", "折线图", "趋势图", "散点图")
 CLEAN_KEYWORDS = ("清洗", "删除重复行", "填充缺失值", "处理空值", "导出清洗后的")
-SUMMARY_KEYWORDS = ("分析一下这个表格", "看看这个 csv", "总结一下这个文件", "分析一下这个csv", "分析一下这个文件")
+SUMMARY_KEYWORDS = ("分析一下这个表格", "看看这个 csv", "总结一下这个文件", "分析一下这个csv", "分析一下这个文件", "分析一下这个简介", "分析这个简介", "这个简介", "简介")
 
 COMPARISON_OPERATORS: tuple[tuple[str, str], ...] = (
     ("大于等于", "gte"),
@@ -59,9 +59,9 @@ AGG_KEYWORDS = {
 }
 
 ALIAS_CANDIDATES = {
-    "省份": ("province",),
-    "省": ("province",),
-    "地区": ("province", "region", "city"),
+    "省份": ("province", "region", "city", "location", "area"),
+    "省": ("province", "region", "city", "location", "area"),
+    "地区": ("province", "region", "city", "location", "area"),
     "城市": ("city",),
     "市": ("city",),
     "订单状态": ("order_status",),
@@ -115,6 +115,43 @@ IMPLICIT_VALUE_PATTERNS = (
     r"里面有多少(?:条|行|记录)?(?:是|为)?(?P<value>.+?)(?:的)?[？?]?$",
     r"多少(?:条|行|记录)?(?:是|为)?(?P<value>.+?)(?:的)?[？?]?$",
 )
+
+REGION_TO_CITY_VALUES = {
+    "北京": ("北京",),
+    "上海": ("上海",),
+    "天津": ("天津",),
+    "重庆": ("重庆",),
+    "河北": ("石家庄",),
+    "山西": ("太原",),
+    "内蒙古": ("呼和浩特",),
+    "辽宁": ("沈阳",),
+    "吉林": ("长春",),
+    "黑龙江": ("哈尔滨",),
+    "江苏": ("南京",),
+    "浙江": ("杭州",),
+    "安徽": ("合肥",),
+    "福建": ("福州",),
+    "江西": ("南昌",),
+    "山东": ("济南",),
+    "河南": ("郑州",),
+    "湖北": ("武汉",),
+    "湖南": ("长沙",),
+    "广东": ("广州",),
+    "广西": ("南宁",),
+    "海南": ("海口",),
+    "四川": ("成都",),
+    "贵州": ("贵阳",),
+    "云南": ("昆明",),
+    "西藏": ("拉萨",),
+    "陕西": ("西安",),
+    "甘肃": ("兰州",),
+    "青海": ("西宁",),
+    "宁夏": ("银川",),
+    "新疆": ("乌鲁木齐",),
+    "香港": ("香港",),
+    "澳门": ("澳门",),
+    "台湾": ("台北",),
+}
 
 
 @dataclass
@@ -200,13 +237,13 @@ class TableQueryPlanner:
             return self._clarify(filters_result["clarify"], 0.3, filters_result.get("reason") or "条件中的列名无法定位")
         filters = filters_result.get("filters", [])
 
-        query_plan = self._plan_query_table(text, lowered, filters)
-        if query_plan is not None:
-            return query_plan
-
         count_plan = self._plan_count_records(text, lowered, filters)
         if count_plan is not None:
             return count_plan
+
+        query_plan = self._plan_query_table(text, lowered, filters)
+        if query_plan is not None:
+            return query_plan
 
         groupby_statistics_plan = self._plan_groupby_statistics(text, lowered, columns)
         if groupby_statistics_plan is not None:
@@ -255,7 +292,13 @@ class TableQueryPlanner:
                 limit=self._extract_limit(text) or DEFAULT_LIMIT,
                 reason="用户希望筛选并查看满足条件的记录",
             )
-        return None
+        return TableQueryPlan(
+            action="query_table",
+            confidence=0.88,
+            filters=filters,
+            limit=DEFAULT_LIMIT,
+            reason="用户给出了明确筛选条件，默认返回匹配记录",
+        )
 
     def _plan_count_records(self, text: str, lowered: str, filters: list[TableFilter]) -> TableQueryPlan | None:
         if any(keyword in text for keyword in GROUPBY_COUNT_KEYWORDS):
@@ -355,7 +398,8 @@ class TableQueryPlanner:
     def _extract_filters(self, text: str, columns: list[str]) -> dict[str, Any]:
         mention = self._find_best_column_mention(text, columns)
         if mention is None:
-            return {"filters": []}
+            inferred_filters = self._infer_filter_from_value_only(text)
+            return {"filters": inferred_filters}
         if mention.column is None:
             return {"clarify": f"{mention.raw_text} 可能对应多个字段：{'、'.join(mention.ambiguous_candidates)}。你想用哪一列？", "reason": "别名映射到多个候选列"}
 
@@ -373,9 +417,25 @@ class TableQueryPlanner:
                 return {"filters": [TableFilter(column=mention.column, operator=operator, value=None)]}
             if not value:
                 return {"clarify": f"我识别到了字段 `{mention.column}`，但没有看清筛选值。你可以再说一次，比如“{mention.raw_text}是上海”。", "reason": "缺少筛选值"}
+            value = self._adapt_filter_value_for_column(mention.column, value)
             return {"filters": [TableFilter(column=mention.column, operator=operator, value=value)]}
 
         return {"filters": []}
+
+    def _adapt_filter_value_for_column(self, column: str, value: str) -> str:
+        if not column or column not in self._current_df.columns:
+            return value
+        normalized_value = normalize_filter_value(value)
+        series = self._current_df[column].fillna("").astype(str).map(normalize_filter_value)
+        if int((series.str.casefold() == normalized_value.casefold()).sum()) > 0:
+            return value
+        column_name = self._normalize_name(column)
+        if column_name not in {"city", "location", "area", "region"}:
+            return value
+        for candidate in REGION_TO_CITY_VALUES.get(normalized_value, ()):
+            if int((series.str.casefold() == candidate.casefold()).sum()) > 0:
+                return candidate
+        return value
 
     def _find_best_column_mention(self, text: str, columns: list[str]) -> ColumnMention | None:
         mentions: list[ColumnMention] = []

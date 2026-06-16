@@ -16,6 +16,7 @@ from backend.api.memory_api import router as memory_router
 from backend.api.model_api import router as model_router
 from backend.api.project_api import router as project_router
 from backend.api.rag_api import router as rag_router
+from backend.api.raman_pipeline_api import router as raman_pipeline_router
 from backend.api.report_api import router as report_router
 from backend.api.skill_api import router as skill_router
 from backend.api.workspace_api import router as workspace_router
@@ -57,6 +58,7 @@ app.include_router(model_router)
 app.include_router(llm_router)
 app.include_router(project_router)
 app.include_router(rag_router)
+app.include_router(raman_pipeline_router)
 app.include_router(report_router)
 app.include_router(skill_router)
 app.include_router(workspace_router)
