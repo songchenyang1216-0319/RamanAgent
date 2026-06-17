@@ -29,7 +29,11 @@ def assert_file_scope(args: dict, context: ToolContext, *, allow_file_path: bool
             requested_ids.extend(str(item) for item in value if str(item).strip())
     if requested_ids:
         allowed = set(context.file_ids or [])
-        if allowed and any(item not in allowed for item in requested_ids):
+        for item in context.active_files or []:
+            file_id = str(item.get("file_id") or "").strip()
+            if file_id:
+                allowed.add(file_id)
+        if not allowed or any(item not in allowed for item in requested_ids):
             raise ToolRuntimeException("PERMISSION_DENIED", "工具尝试访问未授权文件。")
     if not allow_file_path and args.get("file_path"):
         raise ToolRuntimeException("PERMISSION_DENIED", "该工具不允许直接访问 file_path。")

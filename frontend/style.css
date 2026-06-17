@@ -1008,6 +1008,65 @@ button {
   padding: 8px 0 14px;
 }
 
+.agent-timeline {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  padding: 4px 0 10px;
+}
+
+.agent-timeline-step {
+  position: relative;
+  min-height: 34px;
+  padding: 7px 6px 7px 20px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  background: #fff;
+}
+
+.agent-timeline-step::before {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 13px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+.agent-timeline-step.is-active {
+  border-color: rgba(15, 111, 136, 0.35);
+  color: var(--accent);
+  background: rgba(233, 245, 248, 0.8);
+}
+
+.agent-timeline-step.is-active::before {
+  background: var(--accent);
+}
+
+.agent-timeline-step.is-done {
+  color: var(--text);
+  border-color: rgba(54, 151, 112, 0.25);
+  background: rgba(237, 249, 243, 0.9);
+}
+
+.agent-timeline-step.is-done::before {
+  background: #369770;
+}
+
+.agent-timeline-step.is-error {
+  color: var(--error);
+  border-color: rgba(197, 69, 55, 0.3);
+  background: #fff5f3;
+}
+
+.agent-timeline-step.is-error::before {
+  background: var(--error);
+}
+
 .trace-item {
   position: relative;
   padding-left: 18px;
@@ -1063,6 +1122,16 @@ button {
 .tool-trace-card-body {
   display: grid;
   gap: 4px;
+}
+
+.tool-trace-debug pre {
+  max-height: 220px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: #f7fafb;
+  font-size: 12px;
 }
 
 .confirmation-card {

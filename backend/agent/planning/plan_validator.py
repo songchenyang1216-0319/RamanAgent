@@ -66,6 +66,16 @@ class PlanValidator:
                 )
             if action.requires_file and not normalized.has_file and not normalized.file_path:
                 errors.append(f"{tool.display_name}/{action.action_name} 需要先上传文件。")
+            requested_ids = self._requested_file_ids(step.args)
+            if requested_ids:
+                allowed_ids = set(normalized.file_ids or [])
+                for item in normalized.selected_files or normalized.files or []:
+                    file_id = str(item.get("file_id") or "").strip()
+                    if file_id:
+                        allowed_ids.add(file_id)
+                denied = [file_id for file_id in requested_ids if file_id not in allowed_ids]
+                if denied:
+                    errors.append(f"{tool.display_name}/{action.action_name} 尝试访问未授权文件：{', '.join(denied)}")
             for arg_name in list(action.required_args or []):
                 if arg_name not in dict(step.args or {}):
                     errors.append(f"{tool.display_name}/{action.action_name} 缺少参数：{arg_name}")
@@ -182,3 +192,13 @@ class PlanValidator:
                 result = self.pipeline_runner.validate(request)
                 errors.extend(f"第 {index} 个 Pipeline：{item}" for item in result.get("errors") or [])
                 warnings.extend(f"第 {index} 个 Pipeline：{item}" for item in result.get("warnings") or [])
+
+    def _requested_file_ids(self, args: dict[str, Any]) -> list[str]:
+        result: list[str] = []
+        for key in ("file_id", "file_ids"):
+            value = (args or {}).get(key)
+            if isinstance(value, str):
+                result.append(value)
+            elif isinstance(value, list):
+                result.extend(str(item) for item in value if str(item).strip())
+        return [item for item in result if item]

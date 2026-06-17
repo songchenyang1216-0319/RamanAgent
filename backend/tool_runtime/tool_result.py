@@ -26,7 +26,7 @@ class ToolResult:
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["success"] = bool(self.success)
-        if self.success:
+        if self.success and not self.requires_confirmation and self.status != "confirmation_required":
             payload["error_message"] = ""
             payload["error_code"] = ""
         return payload

@@ -116,6 +116,47 @@ class LLMPlanner:
             raw_text = json.dumps(payload, ensure_ascii=False)
             return PlannerOutput(plan=LLMPlan.from_dict(payload), raw=raw_text, source="deterministic_mock")
 
+        if self._mentions_document_qa(normalized, text, lowered):
+            scope = normalized.rag_scope if normalized.rag_scope in {"conversation", "knowledge_base", "mixed"} else "conversation"
+            return raw(
+                {
+                    "plan_type": "rag",
+                    "intent": "document_question_answering",
+                    "confidence": 0.86,
+                    "requires_file": scope == "conversation",
+                    "requires_confirmation": False,
+                    "reason": "用户基于上传文档或知识库提问，需要走 RAG 并返回引用。",
+                    "steps": [
+                        {
+                            "step_id": "step_001",
+                            "tool_name": "rag",
+                            "action_name": "answer",
+                            "args": {"rag_scope": scope},
+                        }
+                    ],
+                }
+            )
+
+        if self._mentions_table_analysis(normalized, text, lowered):
+            return raw(
+                {
+                    "plan_type": "tool",
+                    "intent": "table_question_answering",
+                    "confidence": 0.82,
+                    "requires_file": True,
+                    "requires_confirmation": False,
+                    "reason": "用户在表格文件上提出统计或筛选问题，应交给表格分析工具。",
+                    "steps": [
+                        {
+                            "step_id": "step_001",
+                            "tool_name": "table_tool",
+                            "action_name": "analyze_table",
+                            "args": {"query": text},
+                        }
+                    ],
+                }
+            )
+
         if self._mentions_deep_learning_denoise(text, lowered):
             return raw(
                 {
@@ -367,3 +408,20 @@ class LLMPlanner:
         if "als" in lowered or "去基线" in text or "归一化" in text or "z-score" in lowered or "zscore" in lowered:
             return False
         return ("sg" in lowered or "savitzky" in lowered or "平滑" in text) and ("光谱" in text or "raman" in lowered or "spectrum" in lowered)
+
+    def _mentions_document_qa(self, normalized: NormalizedMessage, text: str, lowered: str) -> bool:
+        if normalized.rag_scope in {"conversation", "knowledge_base", "mixed"}:
+            return True
+        if normalized.file_type != "document":
+            return False
+        qa_markers = ("文档", "资料", "pdf", "论文", "报告", "内容", "依据", "引用", "根据")
+        ask_markers = ("是什么", "为什么", "怎么", "总结", "提到", "说明", "question", "answer")
+        return any(marker in text or marker in lowered for marker in qa_markers) and any(marker in text or marker in lowered for marker in ask_markers)
+
+    def _mentions_table_analysis(self, normalized: NormalizedMessage, text: str, lowered: str) -> bool:
+        if normalized.file_type != "table":
+            return False
+        if any(marker in text for marker in ("光谱", "甲醇", "拉曼", "峰位")) or "raman" in lowered:
+            return False
+        markers = ("统计", "多少", "平均", "总和", "最大", "最小", "筛选", "列出", "表格", "csv", "excel", "group", "count", "sum")
+        return any(marker in text or marker in lowered for marker in markers)

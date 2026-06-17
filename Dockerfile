@@ -6,8 +6,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     APP_ENV=production \
     BACKEND_HOST=0.0.0.0 \
     BACKEND_PORT=8000 \
-    VECTOR_DB_PROVIDER=mock \
-    EMBEDDING_PROVIDER=mock \
+    VECTOR_DB_PROVIDER=chroma \
+    VECTOR_DB_DIR=/app/storage/vector_db \
+    EMBEDDING_PROVIDER=local \
+    EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5 \
+    RAG_TOP_K=6 \
+    RAG_SCORE_THRESHOLD=0.25 \
+    RAG_ENABLE_KEYWORD_FALLBACK=true \
+    RAG_ENABLE_RERANK=true \
+    RAG_RERANK_PROVIDER=lexical \
     OCR_PROVIDER=none \
     PDF_EXPORT_PROVIDER=none
 

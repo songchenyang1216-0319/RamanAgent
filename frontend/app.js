@@ -538,6 +538,13 @@ function appendStreamingAssistantMessage() {
       <div class="agent-stream-card">
         <details class="agent-stream-thinking" data-stream-thinking open>
           <summary class="agent-stream-thinking-summary" data-stream-thinking-summary>正在分析问题...</summary>
+          <div class="agent-timeline" data-stream-timeline>
+            <div class="agent-timeline-step" data-stage="intent"><span>识别意图</span></div>
+            <div class="agent-timeline-step" data-stage="plan"><span>生成计划</span></div>
+            <div class="agent-timeline-step" data-stage="validate"><span>校验计划</span></div>
+            <div class="agent-timeline-step" data-stage="execute"><span>执行工具</span></div>
+            <div class="agent-timeline-step" data-stage="final"><span>生成结果</span></div>
+          </div>
           <div class="agent-trace" data-stream-trace></div>
         </details>
         <div class="assistant-stream-answer markdown-body" data-stream-answer>
@@ -552,6 +559,7 @@ function appendStreamingAssistantMessage() {
     row,
     thinkingNode: row?.querySelector("[data-stream-thinking]") || null,
     thinkingSummaryNode: row?.querySelector("[data-stream-thinking-summary]") || null,
+    timelineNode: row?.querySelector("[data-stream-timeline]") || null,
     traceNode: row?.querySelector("[data-stream-trace]") || null,
     answerNode: row?.querySelector("[data-stream-answer]") || null,
     answerText: "",
@@ -560,6 +568,7 @@ function appendStreamingAssistantMessage() {
     receivedFinal: false,
   };
   state.activeStreamNode = row;
+  updateStreamTimeline(context, "intent", "active");
   return context;
 }
 
@@ -622,6 +631,38 @@ function getStreamTraceText(eventName, eventPayload = {}) {
   return content || (route ? `当前处理路径：${route}。` : "处理中。");
 }
 
+function streamStageFromEvent(eventName, eventPayload = {}) {
+  const node = String(eventPayload.data?.node || "").trim();
+  if (eventName === "start" || node === "intent" || eventName === "status") return "intent";
+  if (eventName === "planner" || node === "planner") return node === "validate" ? "validate" : "plan";
+  if (node === "validate") return "validate";
+  if (["tool_start", "tool_progress", "tool_result"].includes(eventName) || node === "execute") return "execute";
+  if (eventName === "final" || eventName === "done") return "final";
+  if (eventName === "error") return "execute";
+  return "";
+}
+
+function updateStreamTimeline(streamContext, stage, status = "active") {
+  const timeline = streamContext?.timelineNode;
+  if (!timeline || !stage) {
+    return;
+  }
+  const order = ["intent", "plan", "validate", "execute", "final"];
+  const stageIndex = order.indexOf(stage);
+  timeline.querySelectorAll("[data-stage]").forEach((item) => {
+    const current = item.dataset.stage || "";
+    const currentIndex = order.indexOf(current);
+    item.classList.remove("is-active", "is-done", "is-error");
+    if (status === "error" && current === stage) {
+      item.classList.add("is-error");
+    } else if (currentIndex >= 0 && currentIndex < stageIndex) {
+      item.classList.add("is-done");
+    } else if (current === stage) {
+      item.classList.add(status === "done" ? "is-done" : "is-active");
+    }
+  });
+}
+
 function appendStreamTrace(streamContext, eventPayload = {}) {
   const traceNode = streamContext?.traceNode;
   if (!traceNode || eventPayload.visible === false) {
@@ -631,6 +672,7 @@ function appendStreamTrace(streamContext, eventPayload = {}) {
   if (eventName === "delta") {
     return;
   }
+  updateStreamTimeline(streamContext, streamStageFromEvent(eventName, eventPayload), eventName === "error" ? "error" : (eventName === "done" ? "done" : "active"));
   updateStreamThinkingSummary(streamContext, "正在分析问题...");
   const item = document.createElement("div");
   item.className = `trace-item trace-${eventName}`;
@@ -670,6 +712,19 @@ function buildStreamTraceCardHtml(eventName, eventPayload = {}) {
   const actionName = String(data.action_name || data.response?.action_name || "").trim();
   const source = String(data.source || data.tool_source || data.response?.source || "").trim();
   const errorCode = String(data.error_code || data.response?.error_code || "").trim();
+  const elapsedMs = Number(data.elapsed_ms || data.response?.elapsed_ms || 0);
+  const warning = String(data.warning || data.response?.warning || "").trim();
+  const errorMessage = String(data.error_message || data.response?.error_message || "").trim();
+  const artifacts = Array.isArray(data.artifacts) ? data.artifacts : [];
+  const debugPayload = data.plan || data.validation || data.retrieved_chunks || data.rerank
+    ? {
+        plan: data.plan,
+        validation: data.validation,
+        retrieval_mode: data.retrieval_mode,
+        rerank: data.rerank,
+        retrieved_chunks: data.retrieved_chunks,
+      }
+    : null;
   if (["tool_start", "tool_progress", "tool_result"].includes(eventName) || toolName || actionName) {
     const isMcp = source === "mcp" || toolName.startsWith("mcp_");
     return `
@@ -680,8 +735,13 @@ function buildStreamTraceCardHtml(eventName, eventPayload = {}) {
         </div>
         <div class="tool-trace-card-body">
           <div>${escapeHtml(getStreamTraceText(eventName, eventPayload))}</div>
+          ${elapsedMs ? `<div class="tool-trace-meta">耗时 ${escapeHtml(formatDurationMs(elapsedMs))}</div>` : ""}
+          ${warning ? `<div class="tool-trace-meta warning-text">${escapeHtml(warning)}</div>` : ""}
+          ${errorMessage ? `<div class="tool-trace-meta error-message">${escapeHtml(errorMessage)}</div>` : ""}
+          ${artifacts.length ? `<div class="tool-trace-meta">产物 ${artifacts.length} 个</div>` : ""}
           ${errorCode ? `<div class="tool-trace-meta error-message">${escapeHtml(errorCode)}</div>` : ""}
           ${isMcp ? `<div class="tool-trace-meta">MCP 工具来源：${escapeHtml(source || "mcp")}</div>` : ""}
+          ${debugPayload ? `<details class="tool-trace-debug"><summary>调试信息</summary><pre>${escapeHtml(JSON.stringify(debugPayload, null, 2))}</pre></details>` : ""}
         </div>
       </div>
     `;
@@ -747,6 +807,24 @@ function replaceStreamAnswer(streamContext, text = "") {
   }
   streamContext.answerText = text;
   streamContext.answerNode.innerHTML = renderMarkdown(text || "");
+  scrollToBottom();
+}
+
+function renderStreamFinalAnswer(streamContext, text = "", finalResponse = {}) {
+  if (!streamContext?.answerNode) {
+    return;
+  }
+  streamContext.answerText = text;
+  const artifacts = [
+    ...(Array.isArray(finalResponse?.artifacts) ? finalResponse.artifacts : []),
+    ...(Array.isArray(finalResponse?.data?.artifacts) ? finalResponse.data.artifacts : []),
+  ];
+  streamContext.answerNode.innerHTML = `
+    ${renderMarkdown(text || "")}
+    ${renderWebSearchSources(finalResponse || {})}
+    ${renderRagSources(finalResponse || {})}
+    ${renderArtifacts(artifacts)}
+  `;
   scrollToBottom();
 }
 
@@ -818,10 +896,11 @@ function handleStreamEvent(streamContext, eventPayload) {
     streamContext.receivedFinal = true;
     streamContext.finalResponse = eventPayload.data?.response || null;
     const finalText = eventPayload.content || streamContext.finalResponse?.reply || streamContext.finalResponse?.llm_explanation || streamContext.finalResponse?.error_message || streamContext.answerText;
-    if (finalText && finalText !== streamContext.answerText) {
-      replaceStreamAnswer(streamContext, finalText);
+    if (finalText) {
+      renderStreamFinalAnswer(streamContext, finalText, streamContext.finalResponse || {});
     }
     appendStreamTrace(streamContext, eventPayload);
+    updateStreamTimeline(streamContext, "final", "done");
     finalizeStreamThinking(streamContext, eventPayload);
     return;
   }
@@ -1097,11 +1176,14 @@ function renderRagSources(payload = {}) {
     const location = [item.page ? `页 ${item.page}` : "", item.sheet ? `Sheet ${item.sheet}` : "", item.section || ""]
       .filter(Boolean)
       .join(" · ");
+    const sourceType = item.source_type || item.rag_scope || item.source_group || "source";
+    const score = Number.isFinite(Number(item.score)) ? Number(item.score).toFixed(3) : "";
+    const preview = item.content_excerpt || item.preview || "";
     return `
       <li>
         <strong>[${index + 1}] ${escapeHtml(title)}</strong>
-        ${location ? `<span>${escapeHtml(location)}</span>` : ""}
-        ${item.preview ? `<small>${escapeHtml(item.preview)}</small>` : ""}
+        <span>${escapeHtml([sourceType, location, score ? `score ${score}` : ""].filter(Boolean).join(" · "))}</span>
+        ${preview ? `<small>${escapeHtml(preview)}</small>` : ""}
       </li>
     `;
   }).join("");

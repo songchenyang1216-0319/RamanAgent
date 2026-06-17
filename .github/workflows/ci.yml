@@ -15,6 +15,7 @@ jobs:
       OCR_PROVIDER: none
       PDF_EXPORT_PROVIDER: none
       LLM_PLANNER_MODE: mock
+      TOOL_CALLING_MODE: json
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -29,3 +30,6 @@ jobs:
       - name: Smoke checks
         shell: pwsh
         run: ./scripts/smoke_check.ps1
+      - name: Pytest
+        shell: pwsh
+        run: python -m pytest -q

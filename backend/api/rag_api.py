@@ -138,6 +138,7 @@ def query_rag(payload: RAGQueryRequest, current_user: dict = Depends(get_request
             file_ids=file_ids,
             knowledge_base_ids=knowledge_base_ids,
             rag_scope=rag_scope,
+            top_k=payload.top_k,
         )
         return answer.to_dict()
     result = rag_service.search(
@@ -169,13 +170,22 @@ def rag_status(
     current_user: dict = Depends(get_request_user_context),
 ) -> dict[str, Any]:
     effective_user = _effective_user_id(current_user, user_id)
-    stats = rag_service.vector_store.get_stats()
+    health = rag_service.health(user_id=effective_user, conversation_id=conversation_id)
     enabled_kbs = kb_service.authorized_enabled_ids(effective_user, is_admin=current_user.get("is_admin", False), conversation_id=conversation_id)
     return {
         "success": True,
-        "rag_enabled": rag_service.enabled(),
-        "vector_store": stats,
-        "embedding": rag_service.embedding_service.get_model_info(),
+        "rag_enabled": health["rag_enabled"],
+        "vector_provider": health["vector_provider"],
+        "vector_store_available": health["vector_store_available"],
+        "vector_store": health["vector_store"],
+        "embedding_provider": health["embedding_provider"],
+        "embedding_model": health["embedding_model"],
+        "embedding_is_mock": health["embedding_is_mock"],
+        "embedding": health["embedding"],
+        "production_ready": health["production_ready"],
+        "production_warnings": health["production_warnings"],
+        "indexed_chunk_count": health["indexed_chunk_count"],
+        "failed_indexes": health["failed_indexes"],
         "conversation_id": conversation_id,
         "available_knowledge_base_ids": enabled_kbs,
     }

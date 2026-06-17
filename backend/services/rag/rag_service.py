@@ -169,6 +169,7 @@ class RAGService:
         warnings: list[str] = []
         if app_env == "production" and embedding.get("embedding_provider") == "mock":
             warnings.append("生产环境正在使用 mock embedding，建议切换为 local 或 remote。")
+        warnings.extend(str(item) for item in embedding.get("warnings") or [])
         if self.enabled() and not vector_store.get("available"):
             warnings.append(vector_store.get("error_message") or "向量库不可用。")
         if not self.enabled():
@@ -183,15 +184,26 @@ class RAGService:
                 "needs_reindex_count": max(0, count - indexed),
             }
 
+        conversation_counts = _counts(conversation_chunks)
+        kb_counts = _counts(knowledge_chunks)
+        indexed_chunk_count = conversation_counts["indexed_chunk_count"] + kb_counts["indexed_chunk_count"]
+        production_ready = bool(self.enabled() and vector_store.get("available") and not embedding.get("embedding_is_mock") and not warnings)
         return {
             "success": True,
             "rag_enabled": self.enabled(),
             "app_env": app_env,
+            "vector_provider": self.vector_store.provider,
+            "vector_store_available": bool(vector_store.get("available")),
+            "embedding_provider": embedding.get("embedding_provider"),
+            "embedding_model": embedding.get("embedding_model"),
+            "embedding_is_mock": bool(embedding.get("embedding_is_mock")),
+            "production_ready": production_ready,
+            "indexed_chunk_count": indexed_chunk_count,
             "embedding": embedding,
             "vector_store": vector_store,
             "conversation_id": conversation_id,
-            "conversation": _counts(conversation_chunks),
-            "knowledge_base": _counts(knowledge_chunks),
+            "conversation": conversation_counts,
+            "knowledge_base": kb_counts,
             "failed_indexes": [dict(row) for row in failed_indexes],
             "production_warnings": warnings,
         }
@@ -226,6 +238,8 @@ class RAGService:
         rag_scope: str = "conversation",
     ) -> RAGSearchResult:
         rag_scope = rag_scope if rag_scope in {"conversation", "knowledge_base", "mixed"} else "conversation"
+        if rag_scope in {"knowledge_base", "mixed"} and not knowledge_base_ids:
+            knowledge_base_ids = self._bound_knowledge_base_ids(user_id=user_id, conversation_id=conversation_id)
         if rag_scope == "knowledge_base":
             chunks = self.retriever.retrieve_knowledge_base(query, user_id=user_id, knowledge_base_ids=knowledge_base_ids or [], top_k=top_k)
         elif rag_scope == "mixed":
@@ -258,9 +272,10 @@ class RAGService:
         file_ids: list[str] | None = None,
         knowledge_base_ids: list[str] | None = None,
         rag_scope: str = "conversation",
+        top_k: int | None = None,
     ) -> RAGAnswer:
         started = time.perf_counter()
-        search_result = self.search(query, user_id, conversation_id, file_ids=file_ids, knowledge_base_ids=knowledge_base_ids, rag_scope=rag_scope)
+        search_result = self.search(query, user_id, conversation_id, file_ids=file_ids, knowledge_base_ids=knowledge_base_ids, rag_scope=rag_scope, top_k=top_k)
         if not search_result.chunks:
             answer_text = "资料中未找到足够依据，建议先上传文件或启用相关知识库。"
             self._record_answer_query(
@@ -275,7 +290,17 @@ class RAGService:
                 int((time.perf_counter() - started) * 1000),
                 {},
             )
-            return RAGAnswer(False, query, answer_text, rag_scope, retrieval_mode=search_result.retrieval_mode, rerank=search_result.rerank, error_message=search_result.error_message)
+            return RAGAnswer(
+                False,
+                query,
+                answer_text,
+                rag_scope,
+                retrieved_chunks=[],
+                source_breakdown=search_result.source_breakdown,
+                retrieval_mode=search_result.retrieval_mode,
+                rerank=search_result.rerank,
+                error_message=search_result.error_message,
+            )
         chunk_dicts = [chunk.to_dict() for chunk in search_result.chunks]
         context = build_rag_context(chunk_dicts, rag_scope=rag_scope)
         llm_result = LLMService(user_id=user_id, conversation_id=conversation_id).generate_general_reply(query, system_context=context)
@@ -307,7 +332,7 @@ class RAGService:
             rerank=search_result.rerank,
             model_info=dict(llm_result.get("model_info") or {}),
             rag={
-                "top_k": int(os.getenv("RAG_TOP_K", "6")),
+                "top_k": int(top_k or os.getenv("RAG_TOP_K", "6")),
                 "score_threshold": float(os.getenv("RAG_SCORE_THRESHOLD", "0.25")),
                 "rerank": search_result.rerank,
                 **self.embedding_service.get_model_info(),
@@ -514,12 +539,49 @@ class RAGService:
     def _source_breakdown(self, chunks: list[RetrievedChunk]) -> dict[str, Any]:
         conversation_files = []
         knowledge_bases = []
+        conversation_ids: set[str] = set()
+        knowledge_base_ids: set[str] = set()
         for chunk in chunks:
             if chunk.rag_scope == "knowledge_base":
                 knowledge_bases.append({"knowledge_base_id": chunk.knowledge_base_id, "knowledge_base_name": chunk.knowledge_base_name, "kb_file_id": chunk.kb_file_id, "filename": chunk.filename})
+                if chunk.knowledge_base_id:
+                    knowledge_base_ids.add(str(chunk.knowledge_base_id))
             else:
                 conversation_files.append({"file_id": chunk.file_id, "filename": chunk.filename})
-        return {"conversation_files": conversation_files, "knowledge_bases": knowledge_bases}
+                if chunk.file_id:
+                    conversation_ids.add(str(chunk.file_id))
+        return {
+            "conversation_file_count": len(conversation_files),
+            "knowledge_base_count": len(knowledge_bases),
+            "conversation_unique_file_count": len(conversation_ids),
+            "knowledge_base_unique_count": len(knowledge_base_ids),
+            "conversation_files": conversation_files,
+            "knowledge_bases": knowledge_bases,
+        }
+
+    def _bound_knowledge_base_ids(self, *, user_id: str, conversation_id: str) -> list[str]:
+        if not conversation_id:
+            return []
+        init_agent_memory_db()
+        connection = get_db_connection()
+        try:
+            rows = connection.execute(
+                """
+                SELECT ckb.knowledge_base_id
+                FROM conversation_knowledge_bases ckb
+                JOIN knowledge_bases kb ON kb.knowledge_base_id = ckb.knowledge_base_id
+                WHERE ckb.user_id = ?
+                  AND ckb.conversation_id = ?
+                  AND ckb.enabled = 1
+                  AND kb.enabled = 1
+                  AND kb.deleted_at IS NULL
+                ORDER BY ckb.updated_at DESC, ckb.id DESC
+                """,
+                (user_id, conversation_id),
+            ).fetchall()
+            return [str(row["knowledge_base_id"]) for row in rows]
+        finally:
+            connection.close()
 
     def _fallback_answer(self, query: str, chunks: list[RetrievedChunk]) -> str:
         lines = ["模型不可用，以下为基于检索片段的本地简要回答。", "", f"问题：{query}", "", "可用依据："]

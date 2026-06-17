@@ -137,6 +137,31 @@ class ToolCatalog:
                     "rebuild_index": _action("rebuild_index", "重建 RAG 索引。", requires_confirmation=True, confirmation_message="重建索引会改写向量索引并可能耗时较久，请确认是否继续。", danger_level="medium", timeout_seconds=300, side_effects=["write_file", "long_running"]),
                 },
             ),
+            "table_tool": _tool(
+                "table_tool",
+                "表格分析工具",
+                "对 CSV/XLSX 等表格文件做统计、筛选、分组和预览。",
+                category="data",
+                tags=["csv", "table", "data_analysis"],
+                requires_file=True,
+                actions={
+                    "analyze_table": _action(
+                        "analyze_table",
+                        "根据用户问题分析当前表格。",
+                        requires_file=True,
+                        input_schema={
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                            },
+                            "required": ["query"],
+                        },
+                        timeout_seconds=120,
+                        side_effects=["read_file"],
+                    ),
+                    "summarize_table": _action("summarize_table", "概览当前表格。", requires_file=True, timeout_seconds=120, side_effects=["read_file"]),
+                },
+            ),
             "web_search": _tool(
                 "web_search",
                 "联网搜索",

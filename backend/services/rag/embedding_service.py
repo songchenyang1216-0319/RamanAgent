@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import math
 import os
 from typing import Any
@@ -47,6 +48,8 @@ class EmbeddingService:
             warnings.append("生产环境不建议使用 mock embedding，请配置 EMBEDDING_PROVIDER=local 或 remote。")
         if self.provider == "remote" and not self.api_key:
             warnings.append("远程 embedding 未配置 EMBEDDING_API_KEY。")
+        if self.provider == "local" and importlib.util.find_spec("sentence_transformers") is None:
+            warnings.append("本地 embedding 需要安装 sentence-transformers，并确保 EMBEDDING_MODEL 可加载。")
         return {
             "embedding_provider": self.provider,
             "embedding_model": self.model,

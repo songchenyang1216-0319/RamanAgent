@@ -11,10 +11,14 @@ T = TypeVar("T")
 
 def run_with_timeout(func: Callable[[], T], timeout_seconds: int) -> T:
     timeout = max(1, int(timeout_seconds or 60))
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(func)
-        try:
-            return future.result(timeout=timeout)
-        except FutureTimeout as exc:
-            future.cancel()
-            raise ToolRuntimeException("TOOL_TIMEOUT", f"工具执行超过 {timeout} 秒，已停止等待。") from exc
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(func)
+    try:
+        return future.result(timeout=timeout)
+    except FutureTimeout as exc:
+        future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise ToolRuntimeException("TOOL_TIMEOUT", f"工具执行超过 {timeout} 秒，已停止等待。") from exc
+    finally:
+        if future.done():
+            executor.shutdown(wait=False, cancel_futures=True)
