@@ -724,6 +724,52 @@ button {
   line-height: 1.6;
 }
 
+.tool-action-list,
+.raman-lab-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.tool-action-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.tool-action-row strong,
+.tool-action-row span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.tool-action-row span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.raman-lab-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.json-preview {
+  max-height: 280px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e5e7eb;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .inline-error {
   padding: 10px 12px;
   color: var(--error);
@@ -986,6 +1032,63 @@ button {
 
 .trace-error {
   color: var(--error);
+}
+
+.tool-trace-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.tool-trace-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.tool-trace-card-head strong {
+  font-size: 13px;
+}
+
+.tool-trace-card-head span,
+.tool-trace-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tool-trace-card-body {
+  display: grid;
+  gap: 4px;
+}
+
+.confirmation-card {
+  border-color: #f3c98b;
+  background: #fff9ef;
+}
+
+.mcp-tool-card {
+  border-color: #b8d7e3;
+  background: #f1f9fc;
+}
+
+.sandbox-log-card pre {
+  max-height: 180px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.entity-tag.danger {
+  color: var(--error);
+  border-color: #f4b4ac;
+  background: #fff5f3;
 }
 
 .assistant-stream-answer {
@@ -2999,7 +3102,8 @@ button {
 
   .pipeline-toolbar,
   .pipeline-builder-grid,
-  .pipeline-figure-grid {
+  .pipeline-figure-grid,
+  .raman-lab-grid {
     grid-template-columns: 1fr;
   }
 

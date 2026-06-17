@@ -10,6 +10,7 @@ from backend.skills.registry import execute_skill
 from backend.tools.tool_runner import ToolRunner
 from backend.raman_pipeline.pipeline_runner import RamanPipelineRunner
 from backend.raman_pipeline.pipeline_schema import PipelineRequest, PipelineStep
+from backend.tool_runtime import ToolContext, ToolRuntime
 
 from .plan_types import LLMPlan, PlanStep
 
@@ -18,17 +19,44 @@ class PlanExecutor:
     def __init__(self, pipeline_runner: RamanPipelineRunner | None = None) -> None:
         self.pipeline_runner = pipeline_runner or RamanPipelineRunner()
         self.tool_runner = ToolRunner()
+        self.tool_runtime = ToolRuntime()
 
     def execute(self, plan: LLMPlan, normalized: NormalizedMessage) -> AgentResponse:
         results: list[dict[str, Any]] = []
         artifacts: list[Any] = []
         errors: list[str] = []
+        citations: list[dict[str, Any]] = []
+        context = ToolContext.from_normalized(
+            normalized,
+            source="plan_executor",
+            metadata={
+                **dict(normalized.metadata or {}),
+                "message": normalized.message,
+                "knowledge_base_ids": list(normalized.knowledge_base_ids or []),
+                "rag_scope": normalized.rag_scope,
+            },
+        )
         for step in plan.steps:
-            result = self._execute_step(step, normalized)
+            args = dict(step.args or {})
+            args.setdefault("message", normalized.message)
+            if normalized.file_path:
+                args.setdefault("file_path", normalized.file_path)
+            if normalized.file_ids:
+                args.setdefault("file_ids", list(normalized.file_ids or []))
+            if normalized.knowledge_base_ids:
+                args.setdefault("knowledge_base_ids", list(normalized.knowledge_base_ids or []))
+            if normalized.rag_scope:
+                args.setdefault("rag_scope", normalized.rag_scope)
+            runtime_result = self.tool_runtime.execute(step.tool_name, step.action_name, args, context)
+            result = runtime_result.to_dict()
             results.append(result)
             artifacts.extend(result.get("artifacts") or [])
+            citations.extend(result.get("citations") or [])
+            if result.get("requires_confirmation"):
+                errors.append(str(result.get("summary") or result.get("warning") or "该操作需要确认后才能执行。"))
+                break
             if not result.get("success"):
-                errors.append(str(result.get("error_message") or "步骤执行失败。"))
+                errors.append(str(result.get("error_message") or result.get("summary") or "步骤执行失败。"))
                 break
 
         success = not errors
@@ -44,7 +72,7 @@ class PlanExecutor:
             skill_name=self._skill_name_for(plan.steps[0].tool_name) if plan.steps else None,
             action_name=plan.steps[0].action_name if plan.steps else None,
             artifacts=artifacts,
-            data={"plan": plan.to_dict(), "step_results": results},
+            data={"plan": plan.to_dict(), "step_results": results, "citations": citations},
             error_message="；".join(errors) if errors else None,
             conversation_id=normalized.conversation_id,
             session_id=normalized.session_id,
@@ -111,14 +139,24 @@ class PlanExecutor:
                 "error_message": tool_result.error_message,
             }
         if step.tool_name == "rag":
+            from backend.services.rag import RAGService
+
+            result = RAGService().answer_with_rag(
+                normalized.message,
+                normalized.user_id,
+                normalized.conversation_id,
+                file_ids=list(normalized.file_ids or []),
+                knowledge_base_ids=list(normalized.knowledge_base_ids or []),
+                rag_scope=normalized.rag_scope or "conversation",
+            ).to_dict()
             return {
-                "success": False,
+                "success": bool(result.get("success")),
                 "tool_name": step.tool_name,
                 "action_name": step.action_name,
-                "summary": "",
-                "data": {},
+                "summary": result.get("answer") or result.get("reply") or "",
+                "data": result,
                 "artifacts": [],
-                "error_message": "增强 PlanExecutor 暂不直接执行 RAG，本次将回退旧 RAG 流程。",
+                "error_message": result.get("error_message") or "",
             }
         if step.tool_name == "report_tool":
             result = execute_skill("report-generator", action_name=step.action_name, message=normalized.message)
@@ -131,6 +169,54 @@ class PlanExecutor:
                 "artifacts": list(result.plots or []),
                 "error_message": "；".join(result.errors),
             }
+        if step.tool_name == "model_tool":
+            from backend.services.llm_registry_service import LLMRegistryService
+
+            service = LLMRegistryService()
+            if step.action_name == "get_current_model":
+                data = service.get_current_model()
+            elif step.action_name == "list_models":
+                data = service.list_models()
+            else:
+                data = {"success": False, "error_message": f"model_tool 不支持 action：{step.action_name}"}
+            return {
+                "success": bool(data.get("success", True)),
+                "tool_name": step.tool_name,
+                "action_name": step.action_name,
+                "summary": data.get("message") or "模型信息已获取。",
+                "data": data,
+                "artifacts": [],
+                "error_message": data.get("error_message") or "",
+            }
+        if step.tool_name == "skill_tool":
+            from backend.skills.registry import list_skills
+
+            if step.action_name == "list_skills":
+                data = list_skills(include_actions=True)
+                return {
+                    "success": True,
+                    "tool_name": step.tool_name,
+                    "action_name": step.action_name,
+                    "summary": f"当前共有 {data.get('total', 0)} 个 Skill。",
+                    "data": data,
+                    "artifacts": [],
+                    "error_message": "",
+                }
+        if step.tool_name == "task_tool":
+            from backend.tasks import get_task_manager
+
+            task_id = str((step.args or {}).get("task_id") or "")
+            if step.action_name == "get_task" and task_id:
+                data = get_task_manager().get_task(task_id) or {}
+                return {
+                    "success": bool(data),
+                    "tool_name": step.tool_name,
+                    "action_name": step.action_name,
+                    "summary": "任务详情已获取。" if data else "任务不存在。",
+                    "data": data,
+                    "artifacts": data.get("artifacts") or [],
+                    "error_message": "" if data else "任务不存在。",
+                }
         return {
             "success": False,
             "tool_name": step.tool_name,
@@ -233,4 +319,3 @@ class PlanExecutor:
             "document_tool": "document-reader",
             "report_tool": "report-generator",
         }.get(tool_name)
-

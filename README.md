@@ -29,6 +29,15 @@ RamanAgent 正在向通用 Agent 形态演进，当前同时保留 Raman 光谱�
 - OCR 可选 provider 与扫描件处理入口
 - 文件转换与 PDF fallback 策略
 - Raman Pipeline Builder：算法注册表、内置模板、自定义光谱处理链、步骤图谱和运行历史
+- SQLite 统一持久化层与 Repository
+- 异步任务中心：任务查询、取消、SSE 事件、产物查看
+- Tool Schema 目录、Tool API、权限确认和审计日志
+- 标准 Tool Runtime：统一参数校验、权限、Human Confirmation、超时、重试、错误码和审计
+- Function Calling Adapter：OpenAI/Qwen/DeepSeek/generic schema 导出
+- MCP Runtime 预留：配置读取、工具注册、unavailable 状态展示
+- uploaded executable Skill 沙盒：路径、命令、环境变量和超时限制
+- Raman Benchmark 测试集、Pipeline benchmark、候选模型训练与注册
+- Docker Compose 本地/生产部署模板
 
 ## 项目结构
 
@@ -36,6 +45,7 @@ RamanAgent 正在向通用 Agent 形态演进，当前同时保留 Raman 光谱�
 - `frontend/`：前端页面、样式和静态脚本
 - `artifacts/`：模型文件、模型注册表、训练记录模板
 - `outputs/`：运行产物，包括报告、图谱、上传文件和结果数据库
+- `storage/`：统一数据库、任务记录、知识库、RAG 和用户状态
 - `tests/`：自动化测试
 - `docs/`：测试说明、部署补充说明等文档
 
@@ -100,6 +110,13 @@ GEMINI_AVAILABLE_MODELS=
 OLLAMA_BASE_URL=http://127.0.0.1:11434/v1
 OLLAMA_DEFAULT_MODEL=qwen2.5:7b
 OLLAMA_AVAILABLE_MODELS=qwen2.5:7b,qwen2.5:14b,qwen2.5-coder:7b,llama3.1:8b,deepseek-r1:7b
+
+DATABASE_URL=sqlite:///storage/agent_memory.db
+AGENT_RUNTIME_MODE=hybrid
+LLM_PLANNER_MODE=hybrid
+TOOL_CALLING_MODE=json
+MCP_CONFIG_PATH=config/mcp_servers.json
+MCP_RUNTIME_ENABLE=false
 ```
 
 说明：
@@ -110,6 +127,12 @@ OLLAMA_AVAILABLE_MODELS=qwen2.5:7b,qwen2.5:14b,qwen2.5-coder:7b,llama3.1:8b,deep
 - `*_API_KEY` / `*_BASE_URL`：平台连接配置
 - 新代码会优先根据 `LLM_PROVIDER` 找到对应的 `*_BASE_URL` 和 `*_API_KEY`
 - `LLM_BASE_URL` 仅作为旧代码兼容字段保留
+- `DATABASE_URL`：统一持久化层数据库地址，默认 SQLite
+- `AGENT_RUNTIME_MODE`：Agent 编排运行时，可选 `legacy/graph/hybrid`，默认 `hybrid`
+- `LLM_PLANNER_MODE`：Planner 模式，可选 `off/mock/llm/hybrid`
+- `TOOL_CALLING_MODE`：Planner function calling 模式，可选 `auto/native/json/off`，当前默认 JSON fallback
+- `MCP_CONFIG_PATH`：MCP server 配置文件路径
+- `MCP_RUNTIME_ENABLE`：是否启用真实 MCP runtime 连接；未启用时 MCP 工具显示为 unavailable
 
 如果某个平台的 API Key 没有配置，前端仍会显示该平台和其模型，但会标记为“未配置”，并阻止实际切换调用。
 
@@ -141,6 +164,20 @@ http://127.0.0.1:8000/app/index.html
 
 如果你把前端单独部署到静态服务器，也可以通过对应的前端地址访问。
 
+## Docker 启动
+
+```powershell
+.\scripts\docker_up.ps1
+```
+
+开发模式：
+
+```powershell
+.\scripts\docker_up.ps1 --dev
+```
+
+更多说明见 [docs/deployment_docker.md](./docs/deployment_docker.md)。
+
 ## 后端接口
 
 常用接口包括：
@@ -162,12 +199,31 @@ http://127.0.0.1:8000/app/index.html
 - `DELETE /api/conversations/{conversation_id}/knowledge-bases/{knowledge_base_id}`
 - `GET /api/rag/health`
 - `POST /api/rag/rebuild-all`
+- `GET /api/tools`
+- `POST /api/tools/{tool_name}/{action_name}/validate`
+- `POST /api/tools/{tool_name}/{action_name}/execute`
+- `GET /api/agent/confirmations`
+- `POST /api/agent/confirmations/{confirmation_id}/approve`
+- `POST /api/agent/confirmations/{confirmation_id}/reject`
+- `GET /api/mcp/status`
+- `GET /api/mcp/servers`
+- `GET /api/mcp/tools`
 - `GET /api/raman/algorithms`
 - `GET /api/raman/algorithms/{algorithm_id}`
 - `GET /api/raman/pipeline/templates`
 - `POST /api/raman/pipeline/validate`
 - `POST /api/raman/pipeline/run`
 - `GET /api/raman/pipeline/history`
+- `GET /api/raman/datasets`
+- `POST /api/raman/datasets`
+- `POST /api/raman/benchmark/run`
+- `POST /api/raman/training/run`
+- `GET /api/raman/models`
+- `POST /api/tasks`
+- `GET /api/tasks/{task_id}/events`
+- `POST /api/tasks/{task_id}/cancel`
+- `GET /api/tasks/{task_id}/artifacts`
+- `GET /api/audit-logs`
 - `GET /api/tasks/{task_id}`
 - `GET /api/conversations/{conversation_id}/tasks`
 - `GET /api/conversations/{conversation_id}/messages`
@@ -196,6 +252,24 @@ http://127.0.0.1:8000/app/index.html
 当前 ready 算法覆盖读取校验、波数轴、平滑、基线、归一化、峰检测、质量控制、基础特征提取和经典机器学习回归器。深度学习项为占位算法，模型文件缺失或推理适配器未接入时会标记 `available=false`，不会假装执行成功。
 
 更多说明见 [docs/raman_pipeline.md](./docs/raman_pipeline.md) 和 [docs/algorithm_catalog.md](./docs/algorithm_catalog.md)。
+
+## 产品化能力文档
+
+- [统一持久化层](./docs/database_persistence.md)
+- [异步任务中心](./docs/task_queue.md)
+- [Tool Schema 标准](./docs/tool_schema_standard.md)
+- [工具权限模型](./docs/tool_permission_model.md)
+- [RAG 评测](./docs/rag_evaluation.md)
+- [Raman Benchmark](./docs/raman_benchmark.md)
+- [Raman 模型训练与注册](./docs/raman_model_training.md)
+- [安全模型](./docs/security_model.md)
+- [Skill 沙箱](./docs/skill_sandbox.md)
+- [前端工作台](./docs/frontend_workbench.md)
+- [Agent Graph Runtime](./docs/agent_graph_runtime.md)
+- [Function Calling Adapter](./docs/function_calling_adapter.md)
+- [MCP 接入预留](./docs/mcp_integration.md)
+- [RamanSPy Adapter](./docs/ramanspy_adapter.md)
+- [Agent Eval](./docs/agent_evaluation.md)
 
 ## 流式对话
 
@@ -248,6 +322,28 @@ node --check frontend/app.js
 ```
 
 如果后续你确实需要完整测试，再单独执行项目里的测试脚本或完整测试命令。
+
+这次 Tool Runtime 相关的窄测试：
+
+```powershell
+python -m pytest tests/test_tool_schema_contract.py
+python -m pytest tests/test_function_calling_adapter.py
+python -m pytest tests/test_mcp_config.py
+python -m pytest tests/test_human_confirmation.py
+python -m pytest tests/test_audit_logs.py
+python -m pytest tests/test_error_codes.py
+```
+
+## 运行时文档
+
+- [docs/agent_graph_runtime.md](./docs/agent_graph_runtime.md)
+- [docs/tool_runtime.md](./docs/tool_runtime.md)
+- [docs/function_calling_adapter.md](./docs/function_calling_adapter.md)
+- [docs/mcp_runtime.md](./docs/mcp_runtime.md)
+- [docs/human_confirmation.md](./docs/human_confirmation.md)
+- [docs/audit_logs.md](./docs/audit_logs.md)
+- [docs/error_codes.md](./docs/error_codes.md)
+- [docs/skill_sandbox.md](./docs/skill_sandbox.md)
 
 ## 常见问题
 

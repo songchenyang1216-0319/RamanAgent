@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import subprocess
 import sys
 import time
 import zipfile
@@ -15,7 +14,9 @@ from typing import Any
 from xml.etree import ElementTree as ET
 
 from backend.agent.session_store import get_last_analysis, get_recent_messages, get_task_state, get_session
+from backend.security.skill_sandbox import run_skill_subprocess, validate_skill_path
 from backend.services.llm_service import LLMService
+from raman_core.methanol.config import PROJECT_ROOT
 
 from .base import BaseSkill, SkillResult
 
@@ -855,7 +856,8 @@ class UploadedPackageSkill(BaseSkill):
 
         started = time.perf_counter()
         try:
-            process = subprocess.run(
+            validate_skill_path(input_path, workspace_root=PROJECT_ROOT)
+            process = run_skill_subprocess(
                 [
                     sys.executable,
                     str(script_path),
@@ -914,7 +916,7 @@ class UploadedPackageSkill(BaseSkill):
 
         started = time.perf_counter()
         try:
-            process = subprocess.run(
+            process = run_skill_subprocess(
                 [sys.executable, str(script_path), "--input", message],
                 cwd=str(self.package_dir),
                 capture_output=True,
@@ -1020,7 +1022,8 @@ class UploadedPackageSkill(BaseSkill):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         started = time.perf_counter()
         try:
-            process = subprocess.run(
+            validate_skill_path(input_path, workspace_root=PROJECT_ROOT)
+            process = run_skill_subprocess(
                 command,
                 cwd=str(self.package_dir),
                 capture_output=True,

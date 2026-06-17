@@ -1,23 +1,30 @@
 import {
   activateFile,
+  activateTrainedRamanModel,
   archiveProject,
   attachProjectFile,
   batchAnalyze,
+  cancelTask,
   clearAuthToken,
   createProject,
+  createRamanDataset,
   checkCurrentModel,
   deleteFile as requestDeleteFile,
   deleteReport as requestDeleteReport,
   downloadBatchCsv,
   downloadFileById,
   downloadReport,
+  approveAgentConfirmation,
+  executeToolAction,
   exportReport,
+  getAuditLogs,
   getAuthMe,
   getCurrentRamanModel,
   getConversationMessages,
   getFiles,
   getCurrentLlmModel,
   getRamanAlgorithms,
+  getRamanDatasets,
   getRamanPipelineHistory,
   getRamanPipelineTemplates,
   getModelProviders,
@@ -25,11 +32,15 @@ import {
   getReports,
   getTaskLogs,
   getTaskResult,
+  getTaskArtifacts,
+  getToolCatalog,
+  getTrainedRamanModels,
   getProviderModels,
   getReport,
   getSkillLogs,
   getTasks,
   getBatchSummary,
+  rejectAgentConfirmation,
   previewFile,
   getProjectFiles,
   getProjectReports,
@@ -45,13 +56,17 @@ import {
   setSkillEnabled as requestSetSkillEnabled,
   switchLlmModel,
   refreshLlmModels,
+  runRamanBenchmark,
   runRamanPipeline,
+  runRamanTraining,
   toAssetUrl,
   registerUser,
   runFileOcr,
+  streamTaskEvents,
   uploadWorkspaceFile,
   uploadSkillZip as requestUploadSkillZip,
   validateRamanPipeline,
+  validateToolAction,
 } from "./js/api.js";
 import { initConversationSidebar } from "./js/sidebar.js";
 import { renderArtifacts } from "./js/artifact-renderer.js";
@@ -104,6 +119,10 @@ const state = {
   selectedPipelineTemplate: "basic_preprocessing",
   ramanPipelineResult: null,
   ramanPipelineBusy: false,
+  toolCatalogPayload: { tools: {} },
+  auditLogsPayload: { logs: [] },
+  ramanLabPayload: { datasets: [], models: [], lastBenchmark: null, lastTraining: null },
+  taskEventAbortController: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -615,9 +634,91 @@ function appendStreamTrace(streamContext, eventPayload = {}) {
   updateStreamThinkingSummary(streamContext, "正在分析问题...");
   const item = document.createElement("div");
   item.className = `trace-item trace-${eventName}`;
-  item.textContent = getStreamTraceText(eventName, eventPayload);
+  const cardHtml = buildStreamTraceCardHtml(eventName, eventPayload);
+  if (cardHtml) {
+    item.innerHTML = cardHtml;
+    wireStreamTraceCardActions(item, eventPayload);
+  } else {
+    item.textContent = getStreamTraceText(eventName, eventPayload);
+  }
   traceNode.appendChild(item);
   scrollToBottom();
+}
+
+function buildStreamTraceCardHtml(eventName, eventPayload = {}) {
+  const data = eventPayload.data || {};
+  const confirmation = data.confirmation_payload || data.confirmation || data.response?.confirmation_payload || null;
+  if (confirmation) {
+    return `
+      <div class="tool-trace-card confirmation-card">
+        <div class="tool-trace-card-head">
+          <strong>需要确认</strong>
+          <span>${escapeHtml(confirmation.danger_level || "high")}</span>
+        </div>
+        <div class="tool-trace-card-body">
+          <div>${escapeHtml(confirmation.message || "该操作需要你确认后才能继续。")}</div>
+          <div class="tool-trace-meta">${escapeHtml([confirmation.tool_name, confirmation.action_name].filter(Boolean).join("."))}</div>
+        </div>
+        <div class="inline-actions">
+          <button class="pill-button small ghost" type="button" data-confirm-approve="${escapeHtml(confirmation.confirmation_id || "")}">批准</button>
+          <button class="pill-button small ghost" type="button" data-confirm-reject="${escapeHtml(confirmation.confirmation_id || "")}">拒绝</button>
+        </div>
+      </div>
+    `;
+  }
+  const toolName = String(data.tool_name || data.response?.tool_name || "").trim();
+  const actionName = String(data.action_name || data.response?.action_name || "").trim();
+  const source = String(data.source || data.tool_source || data.response?.source || "").trim();
+  const errorCode = String(data.error_code || data.response?.error_code || "").trim();
+  if (["tool_start", "tool_progress", "tool_result"].includes(eventName) || toolName || actionName) {
+    const isMcp = source === "mcp" || toolName.startsWith("mcp_");
+    return `
+      <div class="tool-trace-card ${isMcp ? "mcp-tool-card" : ""}">
+        <div class="tool-trace-card-head">
+          <strong>${escapeHtml(toolName || "工具调用")}</strong>
+          <span>${escapeHtml(actionName || eventName)}</span>
+        </div>
+        <div class="tool-trace-card-body">
+          <div>${escapeHtml(getStreamTraceText(eventName, eventPayload))}</div>
+          ${errorCode ? `<div class="tool-trace-meta error-message">${escapeHtml(errorCode)}</div>` : ""}
+          ${isMcp ? `<div class="tool-trace-meta">MCP 工具来源：${escapeHtml(source || "mcp")}</div>` : ""}
+        </div>
+      </div>
+    `;
+  }
+  if (eventName === "sandbox_log" || data.sandbox) {
+    return `
+      <div class="tool-trace-card sandbox-log-card">
+        <div class="tool-trace-card-head">
+          <strong>Sandbox</strong>
+          <span>${escapeHtml(data.status || "log")}</span>
+        </div>
+        <pre>${escapeHtml(eventPayload.content || data.message || "沙盒执行日志")}</pre>
+      </div>
+    `;
+  }
+  return "";
+}
+
+function wireStreamTraceCardActions(item, eventPayload = {}) {
+  item.querySelectorAll("[data-confirm-approve]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const confirmationId = button.dataset.confirmApprove || "";
+      const response = await approveAgentConfirmation(confirmationId);
+      showToast(response.success ? "已批准该操作，请重新发送或继续执行原请求。" : (response.error_message || "批准失败"), response.success ? "success" : "error");
+      button.disabled = true;
+      item.querySelectorAll("[data-confirm-reject]").forEach((target) => { target.disabled = true; });
+    });
+  });
+  item.querySelectorAll("[data-confirm-reject]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const confirmationId = button.dataset.confirmReject || "";
+      const response = await rejectAgentConfirmation(confirmationId);
+      showToast(response.success ? "已拒绝该操作。" : (response.error_message || "拒绝失败"), response.success ? "success" : "error");
+      button.disabled = true;
+      item.querySelectorAll("[data-confirm-approve]").forEach((target) => { target.disabled = true; });
+    });
+  });
 }
 
 function summarizeStreamEventData(data = {}) {
@@ -2998,7 +3099,7 @@ async function loadSkillsSafely() {
 
 function setAuthUiVisible(isLoggedIn) {
   $("phase2Panels")?.classList.toggle("hidden", !isLoggedIn);
-  ["workspaceButton", "skillsManageBtn", "skillsButton"].forEach((id) => {
+  ["workspaceButton", "skillsManageBtn", "skillsButton", "toolCatalogButton", "ramanLabButton", "auditLogsButton"].forEach((id) => {
     $(id)?.classList.toggle("hidden", !isLoggedIn);
   });
   const userBar = $("currentUserBar");
@@ -3254,9 +3355,14 @@ function renderFileCenter() {
         file_id: button.dataset.exportDashboardFile || "",
         project_id: state.selectedProjectId || undefined,
         formats: [button.dataset.exportFormat || "markdown"],
-      });
+      }, { asyncTask: true });
       if (!response.success) {
         showToast(response.error_message || "导出报告失败", "error");
+        return;
+      }
+      if (response.async_task) {
+        showToast(`报告导出任务已创建：${response.task_id || ""}`, "success");
+        await loadPhase2Data();
         return;
       }
       const warnings = Array.isArray(response.warnings) ? response.warnings : [];
@@ -3304,6 +3410,9 @@ function renderTaskCenter() {
           <div class="inline-actions">
             <button class="pill-button small" type="button" data-task-logs="${escapeHtml(task.task_id || "")}">查看日志</button>
             <button class="pill-button small" type="button" data-task-result="${escapeHtml(task.task_id || "")}">查看结果</button>
+            <button class="pill-button small ghost" type="button" data-task-artifacts="${escapeHtml(task.task_id || "")}">产物</button>
+            <button class="pill-button small ghost" type="button" data-task-events="${escapeHtml(task.task_id || "")}">订阅事件</button>
+            ${["pending", "running"].includes(String(task.status || "")) ? `<button class="pill-button small ghost" type="button" data-task-cancel="${escapeHtml(task.task_id || "")}">取消</button>` : ""}
             ${task.task_type === "raman_batch_analysis" ? `<button class="pill-button small ghost" type="button" data-task-batch-csv="${escapeHtml(task.task_id || "")}">下载批量 CSV</button>` : ""}
           </div>
         </article>
@@ -3350,6 +3459,384 @@ function renderTaskCenter() {
       }
     });
   });
+  body.querySelectorAll("[data-task-artifacts]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const response = await getTaskArtifacts(button.dataset.taskArtifacts || "");
+      if (!response.success) {
+        showToast(response.error_message || "加载任务产物失败", "error");
+        return;
+      }
+      const artifacts = Array.isArray(response.artifacts) ? response.artifacts : [];
+      showToast(artifacts.length ? `任务产物 ${artifacts.length} 个` : "当前任务暂无产物", artifacts.length ? "info" : "error");
+    });
+  });
+  body.querySelectorAll("[data-task-cancel]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const response = await cancelTask(button.dataset.taskCancel || "");
+      if (!response.success) {
+        showToast(response.error_message || "取消任务失败", "error");
+        return;
+      }
+      showToast("任务已取消", "success");
+      await loadPhase2Data();
+    });
+  });
+  body.querySelectorAll("[data-task-events]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const taskId = button.dataset.taskEvents || "";
+      if (!taskId) {
+        return;
+      }
+      state.taskEventAbortController?.abort();
+      const controller = new AbortController();
+      state.taskEventAbortController = controller;
+      let count = 0;
+      showToast("开始订阅任务事件", "info");
+      const response = await streamTaskEvents(
+        taskId,
+        (event) => {
+          count += 1;
+          const label = event.content || event.event || "任务事件";
+          showToast(label, event.event === "task_failed" ? "error" : "info");
+        },
+        { signal: controller.signal },
+      );
+      if (!response.success) {
+        showToast(response.error_message || "订阅任务事件失败", "error");
+        return;
+      }
+      showToast(`任务事件流结束，共 ${count} 条`, "success");
+      await loadPhase2Data();
+    });
+  });
+}
+
+function renderToolCatalogPanel() {
+  const body = $("toolCatalogBody");
+  if (!body) {
+    return;
+  }
+  const toolsPayload = state.toolCatalogPayload || {};
+  const tools = toolsPayload.tools && typeof toolsPayload.tools === "object" ? toolsPayload.tools : {};
+  const entries = Object.entries(tools);
+  body.innerHTML = `
+    <div class="panel-note">工具目录来自后端 ToolCatalog，展示每个工具的动作、风险等级、确认要求和参数 Schema。</div>
+    <div class="entity-list">
+      ${
+        entries.length
+          ? entries.map(([toolName, tool]) => {
+              const actions = tool.actions && typeof tool.actions === "object" ? Object.values(tool.actions) : [];
+              return `
+                <article class="entity-card">
+                  <div class="entity-card-head">
+                    <div>
+                      <h4>${escapeHtml(tool.display_name || toolName)}</h4>
+                      <div class="entity-meta">${escapeHtml(tool.description || "")}</div>
+                    </div>
+                    <div class="entity-tags">
+                      <span class="entity-tag">${escapeHtml(tool.category || "tool")}</span>
+                      <span class="entity-tag">${escapeHtml(tool.source || "builtin")}</span>
+                      <span class="entity-tag">${escapeHtml(tool.danger_level || "low")}</span>
+                      ${tool.available === false ? `<span class="entity-tag danger">unavailable</span>` : ""}
+                      ${tool.requires_auth ? `<span class="entity-tag">auth</span>` : ""}
+                    </div>
+                  </div>
+                  ${tool.available === false ? `<div class="inline-error">${escapeHtml(tool.unavailable_reason || "工具当前不可用。")}</div>` : ""}
+                  <div class="tool-action-list">
+                    ${actions.map((action) => {
+                      const actionName = action.action_name || action.name || "";
+                      const sideEffects = Array.isArray(action.side_effects) ? action.side_effects.filter(Boolean).join(", ") : "";
+                      return `
+                      <div class="tool-action-row">
+                        <div>
+                          <strong>${escapeHtml(action.display_name || actionName)}</strong>
+                          <span>${escapeHtml(actionName)} · ${escapeHtml(action.danger_level || "low")} ${action.requires_confirmation ? "· 需确认" : ""}${action.supports_async_task ? " · async" : ""}</span>
+                          ${sideEffects ? `<span>side_effects: ${escapeHtml(sideEffects)}</span>` : ""}
+                        </div>
+                        <div class="inline-actions">
+                          <button class="pill-button small ghost" type="button" data-tool-validate="${escapeHtml(toolName)}" data-tool-action="${escapeHtml(actionName)}">校验</button>
+                          <button class="pill-button small ghost" type="button" data-tool-execute="${escapeHtml(toolName)}" data-tool-action="${escapeHtml(actionName)}">${action.requires_confirmation ? "生成确认" : "试运行"}</button>
+                        </div>
+                      </div>
+                    `;
+                    }).join("")}
+                  </div>
+                </article>
+              `;
+            }).join("")
+          : `<div class="panel-note">工具目录尚未加载。</div>`
+      }
+    </div>
+  `;
+  body.querySelectorAll("[data-tool-validate]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const toolName = button.dataset.toolValidate || "";
+      const actionName = button.dataset.toolAction || "";
+      const action = findToolAction(toolName, actionName);
+      const response = await validateToolAction(toolName, actionName, action?.default_args || {});
+      if (!response.success) {
+        const errors = response.validation?.errors || [];
+        showToast(errors.join("；") || response.error_message || "工具校验未通过", "error");
+        return;
+      }
+      showToast("工具参数校验通过", "success");
+    });
+  });
+  body.querySelectorAll("[data-tool-execute]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const toolName = button.dataset.toolExecute || "";
+      const actionName = button.dataset.toolAction || "";
+      const action = findToolAction(toolName, actionName);
+      const response = await executeToolAction(toolName, actionName, action?.default_args || {});
+      appendToolCatalogRuntimeNotice(response);
+      const runtimeResult = response.response || {};
+      const needsConfirm = runtimeResult.requires_confirmation || runtimeResult.status === "confirmation_required";
+      showToast(
+        needsConfirm ? "已生成确认请求" : (response.success ? "工具试运行完成" : (response.error_message || runtimeResult.error_message || "工具试运行失败")),
+        response.success ? "success" : "error",
+      );
+    });
+  });
+}
+
+function appendToolCatalogRuntimeNotice(response = {}) {
+  const body = $("toolCatalogBody");
+  const result = response.response || {};
+  if (!body || !result) {
+    return;
+  }
+  const confirmation = result.confirmation_payload || null;
+  const notice = document.createElement("div");
+  if (confirmation) {
+    notice.className = "tool-trace-card confirmation-card";
+    notice.innerHTML = `
+      <div class="tool-trace-card-head">
+        <strong>已生成确认请求</strong>
+        <span>${escapeHtml(confirmation.danger_level || "high")}</span>
+      </div>
+      <div class="tool-trace-card-body">
+        <div>${escapeHtml(confirmation.message || "")}</div>
+        <div class="tool-trace-meta">${escapeHtml([confirmation.tool_name, confirmation.action_name].filter(Boolean).join("."))}</div>
+      </div>
+      <div class="inline-actions">
+        <button class="pill-button small ghost" type="button" data-confirm-approve="${escapeHtml(confirmation.confirmation_id || "")}">批准</button>
+        <button class="pill-button small ghost" type="button" data-confirm-reject="${escapeHtml(confirmation.confirmation_id || "")}">拒绝</button>
+      </div>
+    `;
+    wireStreamTraceCardActions(notice, { data: { confirmation_payload: confirmation } });
+  } else {
+    notice.className = result.success === false ? "inline-error" : "panel-note";
+    notice.textContent = result.summary || result.error_message || "工具执行已返回。";
+  }
+  body.prepend(notice);
+}
+
+function findToolAction(toolName, actionName) {
+  const tools = state.toolCatalogPayload?.tools || {};
+  const tool = tools[toolName] || {};
+  const actions = tool.actions && typeof tool.actions === "object" ? Object.values(tool.actions) : [];
+  return actions.find((action) => (action.action_name || action.name) === actionName) || null;
+}
+
+function renderAuditLogPanel() {
+  const body = $("auditLogBody");
+  if (!body) {
+    return;
+  }
+  const logs = Array.isArray(state.auditLogsPayload?.logs) ? state.auditLogsPayload.logs : [];
+  const failed = state.auditLogsPayload?.success === false;
+  body.innerHTML = failed
+    ? `<div class="inline-error">${escapeHtml(state.auditLogsPayload.error_message || "当前账号无权查看审计日志。")}</div>`
+    : logs.length
+      ? `<div class="entity-list">${logs.map((log) => `
+          <article class="entity-card">
+            <div class="entity-card-head">
+              <div>
+                <h4>${escapeHtml(log.action || "")}</h4>
+                <div class="entity-meta">${escapeHtml(log.created_at || "")} · ${escapeHtml(log.user_id || "unknown")} · ${escapeHtml(log.resource_type || "")}:${escapeHtml(log.resource_id || "")}</div>
+              </div>
+              <div class="entity-tags">
+                <span class="entity-tag">${escapeHtml(log.ip_address || "local")}</span>
+              </div>
+            </div>
+          </article>
+        `).join("")}</div>`
+      : `<div class="panel-note">暂无审计日志，或当前账号不是管理员。</div>`;
+}
+
+function renderRamanLabPanel() {
+  const body = $("ramanLabBody");
+  if (!body) {
+    return;
+  }
+  const datasets = Array.isArray(state.ramanLabPayload.datasets) ? state.ramanLabPayload.datasets : [];
+  const models = Array.isArray(state.ramanLabPayload.models) ? state.ramanLabPayload.models : [];
+  const selectedFiles = (state.dashboardFilesPayload.files || []).filter((file) => state.selectedBatchFileIds.has(file.file_id));
+  body.innerHTML = `
+    <div class="raman-lab-grid">
+      <section class="auth-card">
+        <h3>生成测试集</h3>
+        <form id="createRamanDatasetForm">
+          <input class="form-input" name="name" placeholder="测试集名称" required />
+          <textarea class="form-textarea" name="description" placeholder="说明"></textarea>
+          <button class="pill-button" type="submit">用已选文件创建</button>
+        </form>
+        <div class="panel-note">当前文件中心已选 ${escapeHtml(String(selectedFiles.length))} 个文件。</div>
+      </section>
+      <section class="auth-card">
+        <h3>运行 Benchmark</h3>
+        <label class="form-label">测试集</label>
+        <select id="benchmarkDatasetSelect" class="form-select">
+          ${datasets.map((dataset) => `<option value="${escapeHtml(dataset.dataset_id)}">${escapeHtml(dataset.name || dataset.dataset_id)}</option>`).join("")}
+        </select>
+        <button id="runBenchmarkBtn" class="pill-button" type="button">运行基础 Pipeline</button>
+      </section>
+      <section class="auth-card">
+        <h3>训练候选模型</h3>
+        <form id="runRamanTrainingForm">
+          <select class="form-select" name="model_type">
+            ${["SVR", "RandomForestRegressor", "PLSRegression", "Ridge", "Lasso", "LinearRegression", "KNNRegressor"].map((name) => `<option value="${name}">${name}</option>`).join("")}
+          </select>
+          <textarea class="form-textarea" name="features" rows="3" placeholder="features JSON，例如 [[1,2,3],[2,3,4]]"></textarea>
+          <textarea class="form-textarea" name="targets" rows="3" placeholder="targets JSON，例如 [0.1,0.2]"></textarea>
+          <button class="pill-button" type="submit">训练并注册</button>
+        </form>
+      </section>
+    </div>
+    <div class="entity-list">
+      ${datasets.length ? datasets.map((dataset) => `
+        <article class="entity-card">
+          <div class="entity-card-head">
+            <div>
+              <h4>${escapeHtml(dataset.name || "未命名测试集")}</h4>
+              <div class="entity-meta">${escapeHtml(dataset.dataset_id || "")} · 样本 ${escapeHtml(String(dataset.sample_count || 0))} · ${escapeHtml(dataset.target_name || "methanol")}</div>
+            </div>
+          </div>
+        </article>
+      `).join("") : `<div class="panel-note">还没有 Raman 测试集。</div>`}
+      ${models.length ? models.map((model) => `
+        <article class="entity-card">
+          <div class="entity-card-head">
+            <div>
+              <h4>${escapeHtml(model.model_type || model.model_id || "候选模型")}</h4>
+              <div class="entity-meta">${escapeHtml(model.model_id || "")} · ${escapeHtml(model.status || "")} · ${escapeHtml(model.created_at || "")}</div>
+            </div>
+            <button class="pill-button small ghost" type="button" data-activate-raman-model="${escapeHtml(model.model_id || "")}">设为候选激活</button>
+          </div>
+        </article>
+      `).join("") : `<div class="panel-note">还没有训练注册模型。</div>`}
+    </div>
+    ${state.ramanLabPayload.lastBenchmark ? `<pre class="json-preview">${escapeHtml(JSON.stringify(state.ramanLabPayload.lastBenchmark, null, 2))}</pre>` : ""}
+    ${state.ramanLabPayload.lastTraining ? `<pre class="json-preview">${escapeHtml(JSON.stringify(state.ramanLabPayload.lastTraining, null, 2))}</pre>` : ""}
+  `;
+  $("createRamanDatasetForm")?.addEventListener("submit", handleCreateRamanDataset);
+  $("runBenchmarkBtn")?.addEventListener("click", handleRunRamanBenchmark);
+  $("runRamanTrainingForm")?.addEventListener("submit", handleRunRamanTraining);
+  body.querySelectorAll("[data-activate-raman-model]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const response = await activateTrainedRamanModel(button.dataset.activateRamanModel || "");
+      showToast(response.success ? "候选模型已激活" : (response.error_message || "激活失败"), response.success ? "success" : "error");
+      await loadRamanLabData();
+      renderRamanLabPanel();
+    });
+  });
+}
+
+async function loadToolCatalogData() {
+  const response = await getToolCatalog();
+  state.toolCatalogPayload = response?.success ? response : { tools: {} };
+  renderToolCatalogPanel();
+}
+
+async function loadAuditLogData() {
+  const response = await getAuditLogs({ limit: 30 });
+  state.auditLogsPayload = response?.success ? response : response || { logs: [] };
+  renderAuditLogPanel();
+}
+
+async function loadRamanLabData() {
+  const [datasetsResponse, modelsResponse] = await Promise.all([
+    getRamanDatasets(),
+    getTrainedRamanModels(),
+  ]);
+  state.ramanLabPayload = {
+    ...state.ramanLabPayload,
+    datasets: datasetsResponse?.success && Array.isArray(datasetsResponse.datasets) ? datasetsResponse.datasets : [],
+    models: modelsResponse?.success && Array.isArray(modelsResponse.models) ? modelsResponse.models : [],
+  };
+  renderRamanLabPanel();
+}
+
+async function handleCreateRamanDataset(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const selectedFiles = (state.dashboardFilesPayload.files || []).filter((file) => state.selectedBatchFileIds.has(file.file_id));
+  if (!selectedFiles.length) {
+    showToast("请先在文件中心选择文件", "error");
+    return;
+  }
+  const response = await createRamanDataset({
+    name: String(form.get("name") || ""),
+    description: String(form.get("description") || ""),
+    files: selectedFiles.map((file) => file.path || file.file_path || file.saved_file || "").filter(Boolean),
+    sample_count: selectedFiles.length,
+    target_type: "regression",
+    target_name: "methanol",
+  });
+  if (!response.success) {
+    showToast(response.error_message || "创建测试集失败", "error");
+    return;
+  }
+  showToast("Raman 测试集已创建", "success");
+  await loadRamanLabData();
+}
+
+async function handleRunRamanBenchmark() {
+  const datasetId = $("benchmarkDatasetSelect")?.value || "";
+  if (!datasetId) {
+    showToast("请先创建或选择测试集", "error");
+    return;
+  }
+  const response = await runRamanBenchmark({
+    dataset_id: datasetId,
+    pipelines: [{ template_id: "basic_preprocessing" }],
+  });
+  if (!response.success) {
+    showToast(response.error_message || "Benchmark 运行失败", "error");
+    return;
+  }
+  state.ramanLabPayload.lastBenchmark = response.benchmark || response;
+  showToast("Benchmark 运行完成", "success");
+  renderRamanLabPanel();
+}
+
+async function handleRunRamanTraining(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  let features = [];
+  let targets = [];
+  try {
+    features = JSON.parse(String(form.get("features") || "[]"));
+    targets = JSON.parse(String(form.get("targets") || "[]"));
+  } catch {
+    showToast("features 或 targets JSON 不合法", "error");
+    return;
+  }
+  const response = await runRamanTraining({
+    model_type: String(form.get("model_type") || "SVR"),
+    target: "methanol",
+    features,
+    targets,
+  });
+  if (!response.success) {
+    showToast(response.error_message || response.message || "训练失败", "error");
+    state.ramanLabPayload.lastTraining = response;
+    renderRamanLabPanel();
+    return;
+  }
+  state.ramanLabPayload.lastTraining = response;
+  showToast("候选模型训练完成并已注册", "success");
+  await loadRamanLabData();
 }
 
 function renderReportCenter() {
@@ -3409,15 +3896,22 @@ async function loadPhase2Data() {
     renderProjectPanel();
     renderFileCenter();
     renderTaskCenter();
+    renderToolCatalogPanel();
+    renderRamanLabPanel();
+    renderAuditLogPanel();
     renderReportCenter();
     return;
   }
   const projectId = state.selectedProjectId || "";
-  const [projects, files, tasks, reports] = await Promise.all([
+  const [projects, files, tasks, reports, tools, datasets, trainedModels, auditLogs] = await Promise.all([
     getProjects(),
     getFiles({ userId: state.userId, projectId }),
     getTasks({ userId: state.userId, workspaceId: "" }),
     getReports(projectId),
+    getToolCatalog(),
+    getRamanDatasets(),
+    getTrainedRamanModels(),
+    getAuditLogs({ limit: 30 }),
   ]);
   state.projectsPayload = projects?.success ? projects : { projects: [] };
   const projectList = Array.isArray(state.projectsPayload.projects) ? state.projectsPayload.projects : [];
@@ -3427,12 +3921,22 @@ async function loadPhase2Data() {
   state.dashboardFilesPayload = files?.success ? files : { files: [] };
   state.dashboardTasksPayload = tasks?.success ? tasks : { tasks: [] };
   state.reportsPayload = reports?.success ? reports : { reports: [] };
+  state.toolCatalogPayload = tools?.success ? tools : { tools: {} };
+  state.ramanLabPayload = {
+    ...state.ramanLabPayload,
+    datasets: datasets?.success && Array.isArray(datasets.datasets) ? datasets.datasets : [],
+    models: trainedModels?.success && Array.isArray(trainedModels.models) ? trainedModels.models : [],
+  };
+  state.auditLogsPayload = auditLogs?.success ? auditLogs : auditLogs || { logs: [] };
   const visibleFileIds = new Set((state.dashboardFilesPayload.files || []).map((item) => item.file_id));
   state.selectedBatchFileIds = new Set([...state.selectedBatchFileIds].filter((fileId) => visibleFileIds.has(fileId)));
   setAuthUiVisible(true);
   renderProjectPanel();
   renderFileCenter();
   renderTaskCenter();
+  renderToolCatalogPanel();
+  renderRamanLabPanel();
+  renderAuditLogPanel();
   renderReportCenter();
 }
 
@@ -3504,11 +4008,17 @@ async function handleLogout() {
   state.reportsPayload = { reports: [] };
   state.dashboardFilesPayload = { files: [] };
   state.dashboardTasksPayload = { tasks: [] };
+  state.toolCatalogPayload = { tools: {} };
+  state.auditLogsPayload = { logs: [] };
+  state.ramanLabPayload = { datasets: [], models: [], lastBenchmark: null, lastTraining: null };
   setAuthUiVisible(false);
   renderAuthPanel();
   renderProjectPanel();
   renderFileCenter();
   renderTaskCenter();
+  renderToolCatalogPanel();
+  renderRamanLabPanel();
+  renderAuditLogPanel();
   renderReportCenter();
   state.conversationSidebar?.refreshConversations();
   showToast("已退出登录", "success");
@@ -3556,21 +4066,38 @@ async function handleBatchAnalyze() {
     showToast("请先选择至少一个文件", "error");
     return;
   }
-  const response = await batchAnalyze({
-    file_ids: fileIds,
-    project_id: state.selectedProjectId || undefined,
-    options: {
-      generate_report: true,
-      export_formats: ["markdown"],
+  const response = await batchAnalyze(
+    {
+      file_ids: fileIds,
+      project_id: state.selectedProjectId || undefined,
+      options: {
+        generate_report: true,
+        export_formats: ["markdown"],
+      },
     },
-  });
+    { asyncTask: true },
+  );
   if (!response.success) {
     showToast(response.error_message || "批量分析失败", "error");
+    return;
+  }
+  if (response.async_task) {
+    showToast(`批量分析任务已创建：${response.task_id || ""}`, "success");
+    await loadPhase2Data();
     return;
   }
   const summary = response.summary || {};
   showToast(`批量分析完成：成功 ${summary.success_count || 0}，失败 ${summary.failed_count || 0}`, summary.failed_count ? "info" : "success");
   await loadPhase2Data();
+}
+
+function openDashboardCard(cardId) {
+  const card = $(cardId);
+  if (!card) {
+    return;
+  }
+  card.open = true;
+  card.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function bindPhase2Events() {
@@ -3584,6 +4111,27 @@ function bindPhase2Events() {
   $("refreshFilesBtn")?.addEventListener("click", loadPhase2Data);
   $("refreshTasksBtn")?.addEventListener("click", loadPhase2Data);
   $("refreshReportsBtn")?.addEventListener("click", loadPhase2Data);
+  $("refreshToolsBtn")?.addEventListener("click", loadToolCatalogData);
+  $("refreshRamanLabBtn")?.addEventListener("click", loadRamanLabData);
+  $("refreshAuditLogsBtn")?.addEventListener("click", loadAuditLogData);
+  $("toolCatalogButton")?.addEventListener("click", async () => {
+    openDashboardCard("toolCatalogCard");
+    if (!Object.keys(state.toolCatalogPayload?.tools || {}).length) {
+      await loadToolCatalogData();
+    }
+  });
+  $("ramanLabButton")?.addEventListener("click", async () => {
+    openDashboardCard("ramanLabCard");
+    if (!state.ramanLabPayload.datasets.length && !state.ramanLabPayload.models.length) {
+      await loadRamanLabData();
+    }
+  });
+  $("auditLogsButton")?.addEventListener("click", async () => {
+    openDashboardCard("auditLogCard");
+    if (!state.auditLogsPayload.logs.length) {
+      await loadAuditLogData();
+    }
+  });
 }
 
 function buildChatRequestOptions(message, selectedFiles, timeoutMs) {

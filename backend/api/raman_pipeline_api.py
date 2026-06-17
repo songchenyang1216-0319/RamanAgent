@@ -8,19 +8,25 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from backend.api.auth_dependencies import get_request_user_context
+from backend.repositories.pipeline_run_repository import PipelineRunRepository
 from backend.raman_pipeline.algorithm_registry import get_algorithm_registry
 from backend.raman_pipeline.algorithm_schema import RamanPipelineError
 from backend.raman_pipeline.pipeline_runner import RamanPipelineRunner
 from backend.raman_pipeline.pipeline_schema import PipelineRequest
 from backend.raman_pipeline.pipeline_store import PipelineStore
+from backend.security.audit import record_audit_log
+from backend.tasks import get_task_manager
+from backend.tasks.task_schema import TaskCreateRequest
 from raman_core.methanol.config import OUTPUT_DIR, PROJECT_ROOT, ensure_dirs
 
 
 router = APIRouter(prefix="/api/raman", tags=["raman-pipeline"])
 store = PipelineStore()
 runner = RamanPipelineRunner(store=store)
+pipeline_run_repository = PipelineRunRepository()
 
 
 def _error(message: str, status_code: int = 400, suggestion: str = "") -> HTTPException:
@@ -102,13 +108,60 @@ async def validate_pipeline(request: Request) -> dict[str, Any]:
 
 
 @router.post("/pipeline/run")
-async def run_pipeline(request: Request) -> dict[str, Any]:
+async def run_pipeline(
+    request: Request,
+    async_task: bool = Query(default=False),
+    current_user: dict = Depends(get_request_user_context),
+) -> dict[str, Any]:
     try:
         pipeline_request = await _request_to_pipeline_request(request)
         if not pipeline_request.file_path:
             raise RamanPipelineError("缺少 CSV 文件：请上传文件或在 JSON 中提供 file_path。")
+        if async_task:
+            task = get_task_manager().create_task(
+                TaskCreateRequest(
+                    task_type="raman_pipeline",
+                    payload={"pipeline_request": pipeline_request.model_dump()},
+                    user_id=current_user["user_id"],
+                    conversation_id=str(request.query_params.get("conversation_id") or ""),
+                    project_id=str(request.query_params.get("project_id") or "") or None,
+                )
+            )
+            record_audit_log(
+                user_id=current_user.get("user_id"),
+                action="pipeline.run.async",
+                resource_type="pipeline",
+                resource_id=task.get("task_id"),
+                request=request,
+                detail={"template_id": pipeline_request.template_id, "file_path": pipeline_request.file_path},
+            )
+            return {"success": True, "async_task": True, "task_id": task.get("task_id"), "task": task}
         result = runner.run(pipeline_request)
-        return result.model_dump()
+        payload = result.model_dump()
+        pipeline_run_repository.record_run(
+            {
+                "pipeline_run_id": payload.get("run_id"),
+                "user_id": current_user.get("user_id"),
+                "project_id": str(request.query_params.get("project_id") or "") or None,
+                "conversation_id": str(request.query_params.get("conversation_id") or "") or None,
+                "file_id": str(request.query_params.get("file_id") or "") or None,
+                "pipeline_name": pipeline_request.template_id or "custom_pipeline",
+                "pipeline_request": pipeline_request.model_dump(),
+                "pipeline_result": payload,
+                "status": "succeeded" if payload.get("success") else "failed",
+                "elapsed_ms": int(payload.get("elapsed_ms") or 0),
+                "artifacts": payload.get("artifacts") or [],
+            }
+        )
+        record_audit_log(
+            user_id=current_user.get("user_id"),
+            action="pipeline.run",
+            resource_type="pipeline",
+            resource_id=payload.get("run_id"),
+            request=request,
+            detail={"success": payload.get("success"), "template_id": pipeline_request.template_id},
+        )
+        return payload
     except HTTPException:
         raise
     except RamanPipelineError as exc:
@@ -120,4 +173,3 @@ async def run_pipeline(request: Request) -> dict[str, Any]:
 @router.get("/pipeline/history")
 def list_history(limit: int = 30) -> dict[str, Any]:
     return {"success": True, **store.list_history(limit=limit)}
-

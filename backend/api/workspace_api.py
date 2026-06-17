@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from backend.api.auth_dependencies import get_request_user_context
 from backend.services.task_trace_manager import TaskTraceManager
 from backend.services.workspace_manager import DEFAULT_USER_ID, WorkspaceManager
+from backend.tasks import get_task_manager
 
 
 router = APIRouter(tags=["workspace"])
@@ -40,7 +41,12 @@ def get_task_trace(task_id: str, current_user: dict = Depends(get_request_user_c
     try:
         trace = task_trace_manager.get_task_trace(task_id, user_id=current_user["user_id"], is_admin=current_user["is_admin"])
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        task = get_task_manager().get_task(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if not current_user.get("is_admin") and str(task.get("user_id") or "") != str(current_user["user_id"]):
+            raise HTTPException(status_code=403, detail="无权访问该任务。") from exc
+        return {"success": True, **task, "task": task, "steps": task.get("steps") or []}
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     task = trace.get("task") or {}
@@ -61,6 +67,12 @@ def list_tasks(
     if current_user.get("authenticated") and current_user.get("is_admin") and user_id in {"", DEFAULT_USER_ID}:
         effective_user_id = None
     tasks = task_trace_manager.list_tasks(user_id=effective_user_id, conversation_id=workspace_id)
+    db_tasks = get_task_manager().list_tasks(user_id=effective_user_id)
+    if workspace_id:
+        db_tasks = [task for task in db_tasks if str(task.get("conversation_id") or "") == str(workspace_id)]
+    seen = {str(task.get("task_id") or "") for task in tasks}
+    tasks.extend([task for task in db_tasks if str(task.get("task_id") or "") not in seen])
+    tasks.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
     return {
         "success": True,
         "tasks": tasks,
@@ -73,7 +85,10 @@ def get_task_logs(task_id: str, current_user: dict = Depends(get_request_user_co
     try:
         logs = task_trace_manager.get_task_logs(task_id, user_id=current_user["user_id"], is_admin=current_user["is_admin"])
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        task = get_task_manager().get_task(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"success": True, "task_id": task_id, "steps": task.get("steps") or [], "skill_runs": []}
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     return {"success": True, **logs}
@@ -84,7 +99,16 @@ def get_task_result(task_id: str, current_user: dict = Depends(get_request_user_
     try:
         result = task_trace_manager.get_task_result(task_id, user_id=current_user["user_id"], is_admin=current_user["is_admin"])
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        task = get_task_manager().get_task(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {
+            "success": True,
+            "task_id": task_id,
+            "result_summary": task.get("result"),
+            "status": task.get("status"),
+            "artifacts": task.get("artifacts") or [],
+        }
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     return {"success": True, **result}

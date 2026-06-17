@@ -1,0 +1,32 @@
+services:
+  ramanagent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ramanagent:latest
+    container_name: ramanagent
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      BACKEND_HOST: 0.0.0.0
+      BACKEND_PORT: 8000
+      DATABASE_URL: sqlite:////app/storage/agent_memory.db
+      VECTOR_DB_PROVIDER: ${VECTOR_DB_PROVIDER:-mock}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-mock}
+      OCR_PROVIDER: ${OCR_PROVIDER:-none}
+      PDF_EXPORT_PROVIDER: ${PDF_EXPORT_PROVIDER:-none}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./storage:/app/storage
+      - ./outputs:/app/outputs
+      - ./artifacts:/app/artifacts
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

@@ -10,6 +10,8 @@ from backend.services.file_service import FileCatalogService
 from backend.services.knowledge_base import KnowledgeBaseService
 from backend.services.rag import RAGService
 from backend.services.workspace_manager import DEFAULT_USER_ID
+from backend.tasks import get_task_manager
+from backend.tasks.task_schema import TaskCreateRequest
 
 
 router = APIRouter(prefix="/api/rag", tags=["rag"])
@@ -66,17 +68,44 @@ def index_file(payload: RAGIndexFileRequest, current_user: dict = Depends(get_re
 
 
 @router.post("/rebuild-all")
-def rebuild_all_indexes(payload: RAGRebuildAllRequest | None = None, current_user: dict = Depends(get_request_user_context)) -> dict[str, Any]:
+def rebuild_all_indexes(
+    payload: RAGRebuildAllRequest | None = None,
+    async_task: bool = Query(default=False),
+    current_user: dict = Depends(get_request_user_context),
+) -> dict[str, Any]:
     payload = payload or RAGRebuildAllRequest()
     if not current_user.get("is_admin", False):
         raise HTTPException(status_code=403, detail={"error_code": "RAG_ADMIN_REQUIRED", "error_message": "全量重建索引需要管理员权限。"})
     effective_user = _effective_user_id(current_user, payload.user_id)
+    if async_task:
+        task = get_task_manager().create_task(
+            TaskCreateRequest(
+                task_type="rag_rebuild",
+                payload={"user_id": effective_user},
+                user_id=effective_user,
+            )
+        )
+        return {"success": True, "async_task": True, "task_id": task.get("task_id"), "task": task}
     return rag_service.rebuild_all_indexes(effective_user)
 
 
 @router.post("/rebuild-conversation-index")
-def rebuild_conversation_index(payload: RAGIndexFileRequest, current_user: dict = Depends(get_request_user_context)) -> dict[str, Any]:
+def rebuild_conversation_index(
+    payload: RAGIndexFileRequest,
+    async_task: bool = Query(default=False),
+    current_user: dict = Depends(get_request_user_context),
+) -> dict[str, Any]:
     effective_user = _effective_user_id(current_user, payload.user_id)
+    if async_task:
+        task = get_task_manager().create_task(
+            TaskCreateRequest(
+                task_type="rag_rebuild",
+                payload={"user_id": effective_user, "conversation_id": payload.conversation_id},
+                user_id=effective_user,
+                conversation_id=payload.conversation_id,
+            )
+        )
+        return {"success": True, "async_task": True, "task_id": task.get("task_id"), "task": task}
     return rag_service.rebuild_conversation_index(effective_user, payload.conversation_id)
 
 

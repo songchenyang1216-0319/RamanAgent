@@ -19,9 +19,10 @@ RamanAgent 不是单一聊天机器人，而是一个保留专业 Raman 分析�
 ```text
 用户输入
   -> Message Normalizer
-  -> Intent Router
-  -> Planner
-  -> Skill Router / Tool Runner / Model Router
+  -> Agent Graph Runtime（hybrid 默认）
+  -> Normalize / Context / Intent / Planner / Validate / Execute / Observe / Repair / FinalAnswer
+  -> Tool Runtime
+  -> Skill Router / Tool Runner / Model Router / RAG / Raman Pipeline
   -> Response Builder
   -> Frontend Renderer
 ```
@@ -31,11 +32,9 @@ RamanAgent 不是单一聊天机器人，而是一个保留专业 Raman 分析�
 ```text
 /api/agent/chat
   -> AgentOrchestrator.handle_chat()
-  -> normalize(request)
-  -> route_intent(normalized)
-  -> make_plan(normalized, intent)
-  -> execute(plan)
-  -> build_response(...)
+  -> AGENT_RUNTIME_MODE 判断 legacy/graph/hybrid
+  -> GraphRunner.run(request)
+  -> fallback 到旧 normalize/route/plan/execute/build_response
   -> 返回统一 AgentResponse
 ```
 
@@ -52,7 +51,43 @@ RamanAgent 不是单一聊天机器人，而是一个保留专业 Raman 分析�
 
 `handle_chat_stream()` 不暴露隐藏推理，只输出用户可见的阶段摘要、工具状态和最终回答。旧 `/api/agent/chat` 保持普通 JSON 响应。
 
+## 2.1 Graph Runtime
+
+新增运行时位于：
+
+- `backend/agent/runtime/graph_state.py`
+- `backend/agent/runtime/graph_node.py`
+- `backend/agent/runtime/graph_runner.py`
+- `backend/agent/runtime/nodes/`
+
+Graph Runtime 默认通过 `AGENT_RUNTIME_MODE=hybrid` 接入：
+
+- `legacy`：完全走旧 Orchestrator。
+- `graph`：优先走 GraphRunner，失败返回 graph error。
+- `hybrid`：优先走 GraphRunner，失败时回退旧 Orchestrator。
+
+Graph 节点包括 `NormalizeNode`、`ContextNode`、`IntentNode`、`PlannerNode`、`ValidateNode`、`ExecuteNode`、`ObserveNode`、`RepairNode`、`HumanConfirmNode` 和 `FinalAnswerNode`。每个节点只接收并返回 `GraphState`，debug 模式才返回 node trace；普通模式只输出用户可见状态摘要。
+
 ## 3. 核心分层
+
+### 3.0 持久化与任务层
+
+统一持久化层位于：
+
+- [backend/db/session.py](./backend/db/session.py)
+- [backend/db/models.py](./backend/db/models.py)
+- [backend/db/init_db.py](./backend/db/init_db.py)
+- [backend/repositories](./backend/repositories)
+
+应用启动时先执行 `init_database()`，再初始化旧 history/RAG 数据库。新功能优先写入 Repository，旧 JSON 文件继续作为兼容层保留。
+
+异步任务层位于：
+
+- [backend/tasks/task_manager.py](./backend/tasks/task_manager.py)
+- [backend/tasks/task_queue.py](./backend/tasks/task_queue.py)
+- [backend/api/task_api.py](./backend/api/task_api.py)
+
+长耗时操作可以通过 `async_task=true` 交给任务中心执行，并通过 `/api/tasks/{task_id}/events` 输出 SSE 事件。
 
 ### 3.1 Message Normalizer
 
@@ -138,6 +173,40 @@ RamanAgent 不是单一聊天机器人，而是一个保留专业 Raman 分析�
 - 文档工具负责文档正文提取
 - 联网搜索先保留接口位
 
+新的 Tool Schema 与 Tool API 位于：
+
+- [backend/agent/planning/tool_schema.py](./backend/agent/planning/tool_schema.py)
+- [backend/agent/planning/tool_catalog.py](./backend/agent/planning/tool_catalog.py)
+- [backend/api/tool_api.py](./backend/api/tool_api.py)
+
+Planner、前端工具目录和直接 Tool API 共用同一份 schema。高风险动作必须显式确认。
+
+### 3.5.1 Tool Runtime
+
+文件：
+
+- [backend/tool_runtime](./backend/tool_runtime)
+- [backend/api/tool_api.py](./backend/api/tool_api.py)
+- [backend/api/confirmation_api.py](./backend/api/confirmation_api.py)
+
+职责：
+
+- 作为工具执行统一入口
+- 包装旧 ToolRunner、Skill、RAG、Raman Pipeline、MCP 预留工具和任务工具
+- 校验 `input_schema` / `required_args`
+- 校验用户权限和文件作用域
+- 对高风险操作生成 Human Confirmation
+- 为执行过程增加 timeout、retry、audit log 和统一错误码
+
+Tool Runtime 不替代 Raman Pipeline、RAG 或 Skill 系统，而是在它们前面加标准执行边界。Planner 输出仍需要先经过 `PlanValidator`，未经验证的 LLM 输出不会直接进入 adapter。
+
+相关文档：
+
+- [docs/tool_runtime.md](./docs/tool_runtime.md)
+- [docs/human_confirmation.md](./docs/human_confirmation.md)
+- [docs/audit_logs.md](./docs/audit_logs.md)
+- [docs/error_codes.md](./docs/error_codes.md)
+
 ### 3.6 Model Router
 
 文件：
@@ -213,6 +282,16 @@ RamanAgent 不是单一聊天机器人，而是一个保留专业 Raman 分析�
 - `success=false` 时才展示 `error_message`
 - `error_message` 只能放真正异常
 - 不能出现“有结果但 success=false”
+
+## 4.1 产品化横切能力
+
+- 数据库：见 [docs/database_persistence.md](./docs/database_persistence.md)
+- 任务中心：见 [docs/task_queue.md](./docs/task_queue.md)
+- Tool Schema：见 [docs/tool_schema_standard.md](./docs/tool_schema_standard.md)
+- 权限与审计：见 [docs/security_model.md](./docs/security_model.md)
+- RAG 评测：见 [docs/rag_evaluation.md](./docs/rag_evaluation.md)
+- Raman Benchmark：见 [docs/raman_benchmark.md](./docs/raman_benchmark.md)
+- 模型训练注册：见 [docs/raman_model_training.md](./docs/raman_model_training.md)
 
 ## 5. Skill 执行模式
 

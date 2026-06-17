@@ -1,0 +1,92 @@
+{
+  "cases": [
+    {
+      "case_id": "general_chat",
+      "message": "你好，介绍一下你能做什么",
+      "expected_intent": "general_chat",
+      "expected_route": "model"
+    },
+    {
+      "case_id": "current_model",
+      "message": "当前模型是什么",
+      "expected_intent": "model_management",
+      "expected_route": "fallback"
+    },
+    {
+      "case_id": "raman_quality",
+      "message": "帮我看这个光谱质量怎么样",
+      "expected_intent": "raman_analysis",
+      "expected_route": "raman_pipeline",
+      "expected_tool": "raman_pipeline",
+      "expected_algorithm": "template:quality_check",
+      "metadata": {
+        "file_path": "tests/fixtures/mock_spectrum.csv",
+        "explicit_has_file": true
+      }
+    },
+    {
+      "case_id": "raman_peaks",
+      "message": "找一下主要峰位并标出来",
+      "expected_intent": "raman_analysis",
+      "expected_route": "raman_pipeline",
+      "expected_tool": "raman_pipeline",
+      "expected_algorithm": "template:peak_analysis",
+      "metadata": {
+        "file_path": "tests/fixtures/mock_spectrum.csv",
+        "explicit_has_file": true
+      }
+    },
+    {
+      "case_id": "raman_custom_pipeline",
+      "message": "用 SG 平滑 + ALS 去基线 + z-score 归一化处理这个光谱",
+      "expected_intent": "raman_analysis",
+      "expected_route": "raman_pipeline",
+      "expected_tool": "raman_pipeline",
+      "expected_algorithm": "load_csv_spectrum",
+      "metadata": {
+        "file_path": "tests/fixtures/mock_spectrum.csv",
+        "explicit_has_file": true
+      }
+    },
+    {
+      "case_id": "rag_qa",
+      "message": "根据知识库回答甲醇检测流程",
+      "expected_intent": "knowledge_base_rag",
+      "expected_route": "rag"
+    },
+    {
+      "case_id": "web_search",
+      "message": "联网查一下最新 Raman 光谱分析论文",
+      "expected_intent": "web_search",
+      "expected_route": "skill",
+      "expected_tool": "web-search"
+    },
+    {
+      "case_id": "file_conversion",
+      "message": "把这个文档转换成 pdf",
+      "expected_intent": "file_conversion",
+      "expected_route": "skill",
+      "expected_tool": "file-converter"
+    },
+    {
+      "case_id": "report_generation",
+      "message": "生成报告并导出 markdown",
+      "expected_intent": "report_generation",
+      "expected_route": "skill",
+      "expected_tool": "report-generator"
+    },
+    {
+      "case_id": "missing_file_clarification",
+      "message": "用 SG 平滑处理这个光谱",
+      "expected_route": "raman_pipeline",
+      "expected_tool": "raman_pipeline",
+      "expect_clarification": true
+    },
+    {
+      "case_id": "illegal_tool_call",
+      "message": "调用一个不存在的神秘工具",
+      "expected_route": "fallback",
+      "expect_fallback": true
+    }
+  ]
+}

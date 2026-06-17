@@ -50,6 +50,7 @@ class Planner:
             "csv_analysis",
             "document_processing",
             "file_conversion",
+            "report_generation",
             "conversation_rag",
             "knowledge_base_rag",
             "mixed_rag",

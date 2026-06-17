@@ -19,6 +19,8 @@ from backend.services.file_service import FileCatalogService
 from backend.services.ocr import OCRService
 from backend.services.rag import RAGService
 from backend.services.workspace_manager import DEFAULT_USER_ID, WorkspaceManager
+from backend.tasks import get_task_manager
+from backend.tasks.task_schema import TaskCreateRequest
 from raman_core.methanol.config import PROJECT_ROOT, REPORT_DIR, ensure_dirs
 
 
@@ -191,8 +193,28 @@ def convert_file(payload: FileConvertRequest, current_user: dict = Depends(get_r
 
 
 @router.post("/{file_id}/ocr")
-def run_file_ocr(file_id: str, payload: FileOCRRequest, current_user: dict = Depends(get_request_user_context)) -> dict:
+def run_file_ocr(
+    file_id: str,
+    payload: FileOCRRequest,
+    async_task: bool = Query(default=False),
+    current_user: dict = Depends(get_request_user_context),
+) -> dict:
     effective_user_id = current_user["user_id"] if current_user.get("authenticated") else (payload.user_id or DEFAULT_USER_ID)
+    if async_task:
+        task = get_task_manager().create_task(
+            TaskCreateRequest(
+                task_type="ocr",
+                payload={
+                    "file_id": file_id,
+                    "conversation_id": payload.conversation_id,
+                    "page_range": payload.page_range,
+                    "is_admin": current_user["is_admin"],
+                },
+                user_id=effective_user_id,
+                conversation_id=payload.conversation_id,
+            )
+        )
+        return {"success": True, "async_task": True, "task_id": task.get("task_id"), "task": task}
     file_item = file_catalog.get_file_for_user(file_id, user_id=effective_user_id, is_admin=current_user["is_admin"])
     if file_item is None:
         raise HTTPException(

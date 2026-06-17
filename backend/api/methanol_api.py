@@ -28,6 +28,8 @@ from backend.services.report_service import generate_methanol_markdown_report
 from backend.services.methanol_service import predict_methanol
 from backend.services.task_trace_manager import TaskTraceManager
 from backend.services.workspace_manager import DEFAULT_USER_ID, WorkspaceManager
+from backend.tasks import get_task_manager
+from backend.tasks.task_schema import TaskCreateRequest
 from raman_core.methanol.config import ARTIFACT_DIR, DEMO_DATA_DIR, PROJECT_ROOT, RAW_DATA_DIR, ensure_dirs
 
 
@@ -370,7 +372,27 @@ class BatchAnalyzePayload(BaseModel):
 
 
 @router.post("/batch-analyze")
-def batch_analyze(payload: BatchAnalyzePayload, current_user: dict = Depends(get_request_user_context)) -> dict:
+def batch_analyze(
+    payload: BatchAnalyzePayload,
+    async_task: bool = Query(default=False),
+    current_user: dict = Depends(get_request_user_context),
+) -> dict:
+    if async_task:
+        task = get_task_manager().create_task(
+            TaskCreateRequest(
+                task_type="raman_batch_analysis",
+                payload={
+                    "file_ids": payload.file_ids,
+                    "project_id": payload.project_id,
+                    "options": payload.options or {},
+                    "is_admin": current_user["is_admin"],
+                },
+                user_id=current_user["user_id"],
+                conversation_id=payload.project_id or "raman-batch",
+                project_id=payload.project_id,
+            )
+        )
+        return {"success": True, "async_task": True, "task_id": task.get("task_id"), "task": task}
     try:
         return batch_analysis_service.batch_analyze(
             user_id=current_user["user_id"],

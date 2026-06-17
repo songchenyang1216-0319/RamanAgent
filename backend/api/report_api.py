@@ -15,6 +15,8 @@ from backend.services.report_export_service import ReportExportService
 from backend.services.report_registry_service import ReportRegistryService
 from backend.services.task_trace_manager import TaskTraceManager
 from backend.services.workspace_manager import WorkspaceManager
+from backend.tasks import get_task_manager
+from backend.tasks.task_schema import TaskCreateRequest
 
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
@@ -49,7 +51,28 @@ def get_report(report_id: str, current_user: dict = Depends(get_request_user_con
 
 
 @router.post("/export")
-def export_report(payload: ReportExportPayload, current_user: dict = Depends(get_request_user_context)) -> dict:
+def export_report(
+    payload: ReportExportPayload,
+    async_task: bool = Query(default=False),
+    current_user: dict = Depends(get_request_user_context),
+) -> dict:
+    if async_task:
+        task = get_task_manager().create_task(
+            TaskCreateRequest(
+                task_type="report_export",
+                payload={
+                    "task_id": payload.task_id,
+                    "file_id": payload.file_id,
+                    "project_id": payload.project_id,
+                    "formats": payload.formats,
+                    "title": payload.title,
+                    "is_admin": current_user["is_admin"],
+                },
+                user_id=current_user["user_id"],
+                project_id=payload.project_id,
+            )
+        )
+        return {"success": True, "async_task": True, "task_id": task.get("task_id"), "task": task}
     try:
         return report_export_service.export_report(
             user_id=current_user["user_id"],

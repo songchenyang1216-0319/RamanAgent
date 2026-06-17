@@ -1,0 +1,43 @@
+{
+  "servers": [
+    {
+      "name": "local_demo",
+      "transport": "stdio",
+      "command": "",
+      "args": [],
+      "env": {},
+      "enabled": false,
+      "timeout_seconds": 30,
+      "tools": [
+        {
+          "name": "demo_lookup",
+          "description": "Example MCP lookup tool. Copy this file to config/mcp_servers.json and fill command/args to enable.",
+          "category": "mcp",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ]
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "result": {
+                "type": "string"
+              }
+            }
+          },
+          "side_effects": [
+            "network"
+          ],
+          "timeout_seconds": 30
+        }
+      ]
+    }
+  ]
+}

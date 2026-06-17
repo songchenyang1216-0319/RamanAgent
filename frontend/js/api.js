@@ -320,7 +320,7 @@ export async function validateRamanPipeline(payload = {}) {
   });
 }
 
-export async function runRamanPipeline({ file = null, payload = {} } = {}) {
+export async function runRamanPipeline({ file = null, payload = {}, asyncTask = false } = {}) {
   if (file) {
     const formData = new FormData();
     formData.append("file", file);
@@ -328,12 +328,14 @@ export async function runRamanPipeline({ file = null, payload = {} } = {}) {
     return requestJson("/api/raman/pipeline/run", {
       method: "POST",
       body: formData,
+      params: { async_task: asyncTask ? "true" : undefined },
       timeoutMs: 120000,
     });
   }
   return requestJson("/api/raman/pipeline/run", {
     method: "POST",
     body: payload,
+    params: { async_task: asyncTask ? "true" : undefined },
     timeoutMs: 120000,
   });
 }
@@ -718,9 +720,10 @@ export async function activateFile(fileId, conversationId, userId = "default_use
   });
 }
 
-export async function runFileOcr(fileId, { conversationId = "", userId = "default_user", pageRange = "" } = {}) {
+export async function runFileOcr(fileId, { conversationId = "", userId = "default_user", pageRange = "", asyncTask = false } = {}) {
   return requestJson(`/api/files/${encodeURIComponent(fileId)}/ocr`, {
     method: "POST",
+    params: { async_task: asyncTask ? "true" : undefined },
     body: {
       conversation_id: conversationId,
       user_id: userId,
@@ -767,6 +770,87 @@ export async function getTasks({ userId = "default_user", workspaceId = "" } = {
     },
     timeoutMs: 8000,
   });
+}
+
+export async function createTask(payload) {
+  return requestJson("/api/tasks", {
+    method: "POST",
+    body: payload,
+    timeoutMs: 12000,
+  });
+}
+
+export async function cancelTask(taskId) {
+  if (!taskId) {
+    return { success: false, error_message: "taskId 不能为空。" };
+  }
+  return requestJson(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
+    method: "POST",
+    timeoutMs: 12000,
+  });
+}
+
+export async function getTaskArtifacts(taskId) {
+  if (!taskId) {
+    return { success: false, error_message: "taskId 不能为空。" };
+  }
+  return requestJson(`/api/tasks/${encodeURIComponent(taskId)}/artifacts`, {
+    timeoutMs: 8000,
+  });
+}
+
+export function buildTaskEventUrl(taskId) {
+  return buildUrl(`/api/tasks/${encodeURIComponent(taskId)}/events`);
+}
+
+export async function streamTaskEvents(taskId, onEvent, { signal } = {}) {
+  if (!taskId) {
+    return { success: false, error_message: "taskId 不能为空。" };
+  }
+  const headers = {};
+  const token = getAuthToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  const response = await fetch(buildTaskEventUrl(taskId), { headers, signal });
+  if (!response.ok || !response.body) {
+    const data = await response.json().catch(() => ({}));
+    const detail = data.detail || {};
+    const detailPayload = typeof detail === "object" && detail !== null ? detail : { error_message: detail };
+    return {
+      success: false,
+      error_message: detailPayload.error_message || data.error_message || `任务事件流请求失败: ${response.status}`,
+      status: response.status,
+    };
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const flush = (chunk) => {
+    buffer += chunk;
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop() || "";
+    parts.forEach((part) => {
+      const dataLine = part.split("\n").find((line) => line.startsWith("data:"));
+      if (!dataLine) {
+        return;
+      }
+      try {
+        onEvent?.(JSON.parse(dataLine.slice(5).trim()));
+      } catch {
+        onEvent?.({ event: "task_progress", content: dataLine.slice(5).trim() });
+      }
+    });
+  };
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    flush(decoder.decode(value, { stream: true }));
+  }
+  flush(decoder.decode());
+  return { success: true };
 }
 
 export async function getTaskLogs(taskId) {
@@ -970,9 +1054,10 @@ export async function getReport(reportId) {
   });
 }
 
-export async function exportReport(payload) {
+export async function exportReport(payload, { asyncTask = false } = {}) {
   return requestJson("/api/reports/export", {
     method: "POST",
+    params: { async_task: asyncTask ? "true" : undefined },
     body: payload,
     timeoutMs: 120000,
   });
@@ -992,11 +1077,114 @@ export async function downloadReport(reportId, format = "markdown") {
   });
 }
 
-export async function batchAnalyze(payload) {
+export async function batchAnalyze(payload, { asyncTask = false } = {}) {
   return requestJson("/api/methanol/batch-analyze", {
+    method: "POST",
+    params: { async_task: asyncTask ? "true" : undefined },
+    body: payload,
+    timeoutMs: 120000,
+  });
+}
+
+export async function getToolCatalog() {
+  return requestJson("/api/tools", { timeoutMs: 12000 });
+}
+
+export async function validateToolAction(toolName, actionName, args = {}) {
+  return requestJson(`/api/tools/${encodeURIComponent(toolName)}/${encodeURIComponent(actionName)}/validate`, {
+    method: "POST",
+    body: { args },
+    timeoutMs: 12000,
+  });
+}
+
+export async function executeToolAction(toolName, actionName, args = {}, { confirmed = false, confirmationId = "" } = {}) {
+  return requestJson(`/api/tools/${encodeURIComponent(toolName)}/${encodeURIComponent(actionName)}/execute`, {
+    method: "POST",
+    body: { args: confirmationId ? { ...args, confirmation_id: confirmationId } : args, confirmed },
+    timeoutMs: 120000,
+  });
+}
+
+export async function listAgentConfirmations({ status = "" } = {}) {
+  return requestJson("/api/agent/confirmations", {
+    params: { status: status || undefined },
+    timeoutMs: 12000,
+  });
+}
+
+export async function approveAgentConfirmation(confirmationId, note = "") {
+  return requestJson(`/api/agent/confirmations/${encodeURIComponent(confirmationId)}/approve`, {
+    method: "POST",
+    body: { note },
+    timeoutMs: 12000,
+  });
+}
+
+export async function rejectAgentConfirmation(confirmationId, note = "") {
+  return requestJson(`/api/agent/confirmations/${encodeURIComponent(confirmationId)}/reject`, {
+    method: "POST",
+    body: { note },
+    timeoutMs: 12000,
+  });
+}
+
+export async function getMcpStatus() {
+  return requestJson("/api/mcp/status", { timeoutMs: 12000 });
+}
+
+export async function getMcpTools() {
+  return requestJson("/api/mcp/tools", { timeoutMs: 12000 });
+}
+
+export async function getAuditLogs({ limit = 30, userId = "", action = "", resourceType = "" } = {}) {
+  return requestJson("/api/audit-logs", {
+    params: {
+      limit,
+      user_id: userId || undefined,
+      action: action || undefined,
+      resource_type: resourceType || undefined,
+    },
+    timeoutMs: 12000,
+  });
+}
+
+export async function getRamanDatasets() {
+  return requestJson("/api/raman/datasets", { timeoutMs: 12000 });
+}
+
+export async function createRamanDataset(payload) {
+  return requestJson("/api/raman/datasets", {
+    method: "POST",
+    body: payload,
+    timeoutMs: 12000,
+  });
+}
+
+export async function runRamanBenchmark(payload) {
+  return requestJson("/api/raman/benchmark/run", {
     method: "POST",
     body: payload,
     timeoutMs: 120000,
+  });
+}
+
+export async function runRamanTraining(payload) {
+  return requestJson("/api/raman/training/run", {
+    method: "POST",
+    body: payload,
+    timeoutMs: 120000,
+  });
+}
+
+export async function getTrainedRamanModels() {
+  return requestJson("/api/raman/models", { timeoutMs: 12000 });
+}
+
+export async function activateTrainedRamanModel(modelId) {
+  return requestJson(`/api/raman/models/${encodeURIComponent(modelId)}/activate`, {
+    method: "POST",
+    timeoutMs: 12000,
   });
 }
 

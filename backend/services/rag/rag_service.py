@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
 from backend.db.database import get_db_connection, init_agent_memory_db
+from backend.repositories.rag_query_repository import RagQueryRepository
 from backend.services.llm_service import LLMService
 
 from .chunker import RAGChunker
@@ -257,15 +259,42 @@ class RAGService:
         knowledge_base_ids: list[str] | None = None,
         rag_scope: str = "conversation",
     ) -> RAGAnswer:
+        started = time.perf_counter()
         search_result = self.search(query, user_id, conversation_id, file_ids=file_ids, knowledge_base_ids=knowledge_base_ids, rag_scope=rag_scope)
         if not search_result.chunks:
-            return RAGAnswer(False, query, "当前可用资料中没有找到足够依据，建议先上传文件或启用相关知识库。", rag_scope, retrieval_mode=search_result.retrieval_mode, rerank=search_result.rerank, error_message=search_result.error_message)
+            answer_text = "资料中未找到足够依据，建议先上传文件或启用相关知识库。"
+            self._record_answer_query(
+                user_id,
+                conversation_id,
+                query,
+                file_ids,
+                knowledge_base_ids,
+                rag_scope,
+                search_result,
+                answer_text,
+                int((time.perf_counter() - started) * 1000),
+                {},
+            )
+            return RAGAnswer(False, query, answer_text, rag_scope, retrieval_mode=search_result.retrieval_mode, rerank=search_result.rerank, error_message=search_result.error_message)
         chunk_dicts = [chunk.to_dict() for chunk in search_result.chunks]
         context = build_rag_context(chunk_dicts, rag_scope=rag_scope)
         llm_result = LLMService(user_id=user_id, conversation_id=conversation_id).generate_general_reply(query, system_context=context)
         answer = str(llm_result.get("reply") or "").strip()
         if not answer:
             answer = self._fallback_answer(query, search_result.chunks)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        self._record_answer_query(
+            user_id,
+            conversation_id,
+            query,
+            file_ids,
+            knowledge_base_ids,
+            rag_scope,
+            search_result,
+            answer,
+            latency_ms,
+            dict(llm_result.get("model_info") or {}),
+        )
         return RAGAnswer(
             success=True,
             query=query,
@@ -402,45 +431,73 @@ class RAGService:
             connection.close()
 
     def _record_query(self, user_id: str, conversation_id: str, query: str, file_ids: list[str] | None, knowledge_base_ids: list[str] | None, rag_scope: str, result: RAGSearchResult) -> None:
-        init_agent_memory_db()
-        connection = get_db_connection()
-        try:
-            connection.execute(
-                """
-                INSERT INTO rag_queries (
-                    query_id, user_id, conversation_id, query, file_ids_json, top_k,
-                    retrieval_mode, retrieved_chunk_ids_json, created_at, rag_scope,
-                    knowledge_base_ids_json, source_breakdown_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    uuid4().hex,
-                    user_id,
-                    conversation_id,
-                    query,
-                    json.dumps(file_ids or [], ensure_ascii=False),
-                    int(os.getenv("RAG_TOP_K", "6")),
-                    result.retrieval_mode,
-                    json.dumps([chunk.chunk_id for chunk in result.chunks], ensure_ascii=False),
-                    now_iso(),
-                    rag_scope,
-                    json.dumps(knowledge_base_ids or [], ensure_ascii=False),
-                    json.dumps(result.source_breakdown, ensure_ascii=False),
-                ),
-            )
-            connection.commit()
-        finally:
-            connection.close()
+        RagQueryRepository().record_query(
+            {
+                "rag_query_id": uuid4().hex,
+                "query_id": uuid4().hex,
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "query": query,
+                "file_ids_json": file_ids or [],
+                "top_k": int(os.getenv("RAG_TOP_K", "6")),
+                "retrieval_mode": result.retrieval_mode,
+                "retrieved_chunk_ids_json": [chunk.chunk_id for chunk in result.chunks],
+                "retrieved_chunks_json": [chunk.to_dict() for chunk in result.chunks],
+                "citations_json": result.citations,
+                "created_at": now_iso(),
+                "rag_scope": rag_scope,
+                "knowledge_base_ids_json": knowledge_base_ids or [],
+                "source_breakdown_json": result.source_breakdown,
+            }
+        )
+
+    def _record_answer_query(
+        self,
+        user_id: str,
+        conversation_id: str,
+        query: str,
+        file_ids: list[str] | None,
+        knowledge_base_ids: list[str] | None,
+        rag_scope: str,
+        result: RAGSearchResult,
+        answer: str,
+        latency_ms: int,
+        model_info: dict[str, Any],
+    ) -> None:
+        RagQueryRepository().record_query(
+            {
+                "rag_query_id": uuid4().hex,
+                "query_id": uuid4().hex,
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "query": query,
+                "rag_scope": rag_scope,
+                "file_ids_json": file_ids or [],
+                "knowledge_base_ids_json": knowledge_base_ids or [],
+                "retrieved_chunks_json": [chunk.to_dict() for chunk in result.chunks],
+                "retrieved_chunk_ids_json": [chunk.chunk_id for chunk in result.chunks],
+                "citations_json": result.citations,
+                "answer": answer,
+                "latency_ms": latency_ms,
+                "model_info_json": model_info,
+                "retrieval_mode": result.retrieval_mode,
+                "source_breakdown_json": result.source_breakdown,
+                "top_k": int(os.getenv("RAG_TOP_K", "6")),
+            }
+        )
 
     def _citations(self, chunks: list[RetrievedChunk]) -> list[dict[str, Any]]:
         return [
             {
                 "chunk_id": chunk.chunk_id,
+                "source_type": chunk.rag_scope or chunk.source_type,
+                "source_id": chunk.knowledge_base_id or chunk.file_id or chunk.kb_file_id,
                 "file_id": chunk.file_id,
                 "kb_file_id": chunk.kb_file_id,
                 "knowledge_base_id": chunk.knowledge_base_id,
                 "knowledge_base_name": chunk.knowledge_base_name,
                 "filename": chunk.filename,
+                "file_name": chunk.filename,
                 "source_group": chunk.source_group,
                 "rag_scope": chunk.rag_scope,
                 "page": chunk.page,
@@ -449,6 +506,7 @@ class RAGService:
                 "score": chunk.score,
                 "distance": chunk.distance,
                 "preview": chunk.text[:240],
+                "content_excerpt": chunk.text[:500],
             }
             for chunk in chunks
         ]

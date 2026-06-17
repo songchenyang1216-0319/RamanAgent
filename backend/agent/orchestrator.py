@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 import asyncio
 from typing import Any
@@ -9,6 +10,8 @@ from backend.agent.intent_router import IntentRouter
 from backend.agent.message_normalizer import MessageNormalizer
 from backend.agent.planner import Planner
 from backend.agent.planning import LLMPlanner, PlanExecutor, PlanValidator, ToolCatalog
+from backend.agent.runtime.graph_errors import GraphFallbackRequested
+from backend.agent.runtime.graph_runner import GraphRunner
 from backend.agent.streaming import StreamEventBuilder, compact_response_for_stream, split_text_for_stream
 from backend.agent.response_builder import ResponseBuilder
 from backend.agent.types import AgentDecision, AgentPlan, IntentResult, NormalizedMessage
@@ -55,6 +58,23 @@ class AgentOrchestrator:
         self.plan_executor = PlanExecutor()
 
     def handle_chat(self, request_payload: dict[str, Any]) -> dict[str, Any]:
+        mode = self._runtime_mode()
+        if mode == "legacy":
+            return self._handle_chat_legacy(request_payload)
+        try:
+            return GraphRunner(raise_on_error=True).run(request_payload)
+        except GraphFallbackRequested as exc:
+            logger.info("Graph Runtime requested fallback: %s", exc)
+            if mode == "hybrid":
+                return self._handle_chat_legacy(request_payload)
+            return self._graph_error_response(request_payload, str(exc), "GraphFallbackRequested")
+        except Exception as exc:
+            logger.exception("Graph Runtime failed: %s", exc)
+            if mode == "hybrid":
+                return self._handle_chat_legacy(request_payload)
+            return self._graph_error_response(request_payload, f"Graph Runtime 执行失败：{exc}", type(exc).__name__)
+
+    def _handle_chat_legacy(self, request_payload: dict[str, Any]) -> dict[str, Any]:
         started = time.perf_counter()
         normalized: NormalizedMessage | None = None
         intent: IntentResult | None = None
@@ -130,6 +150,62 @@ class AgentOrchestrator:
             )
 
     async def handle_chat_stream(self, request_payload: dict[str, Any]):
+        mode = self._runtime_mode()
+        if mode == "legacy":
+            async for event in self._handle_chat_stream_legacy(request_payload):
+                yield event
+            return
+
+        graph_started = time.perf_counter()
+        graph_builder = StreamEventBuilder(
+            conversation_id=str(request_payload.get("conversation_id") or request_payload.get("session_id") or "") or None,
+            session_id=str(request_payload.get("session_id") or request_payload.get("conversation_id") or "") or None,
+        )
+        try:
+            for event in GraphRunner(raise_on_error=True).run_stream(request_payload):
+                await self._pace_stream_event(event)
+                yield event
+            return
+        except GraphFallbackRequested as exc:
+            logger.info("Graph Runtime stream requested fallback: %s", exc)
+            if mode == "hybrid":
+                yield graph_builder.event(
+                    "status",
+                    content="Graph Runtime 已回退旧编排。",
+                    data={"fallback_reason": str(exc)} if bool(request_payload.get("debug")) else {},
+                )
+                async for event in self._handle_chat_stream_legacy(request_payload):
+                    yield event
+                return
+            error_text = str(exc)
+        except Exception as exc:
+            logger.exception("Graph Runtime stream failed: %s", exc)
+            if mode == "hybrid":
+                yield graph_builder.event(
+                    "status",
+                    content="Graph Runtime 失败，正在回退旧编排。",
+                    data={"fallback_reason": str(exc)} if bool(request_payload.get("debug")) else {},
+                )
+                async for event in self._handle_chat_stream_legacy(request_payload):
+                    yield event
+                return
+            error_text = f"Graph Runtime 流式执行失败：{exc}"
+
+        response = self._graph_error_response(request_payload, error_text, "GraphRuntimeError")
+        yield graph_builder.event("error", content=error_text)
+        yield graph_builder.event(
+            "final",
+            content=error_text,
+            data={
+                "response": compact_response_for_stream(response),
+                "route": "graph_error",
+                "success": False,
+                "elapsed_ms": int((time.perf_counter() - graph_started) * 1000),
+            },
+        )
+        yield graph_builder.event("done", content="流式响应已结束。", data={"elapsed_ms": int((time.perf_counter() - graph_started) * 1000)})
+
+    async def _handle_chat_stream_legacy(self, request_payload: dict[str, Any]):
         """流式聊天入口，输出 AgentStreamEvent。
 
         只暴露用户可见的阶段、工具状态和最终回答，不输出隐藏推理过程。
@@ -839,3 +915,40 @@ class AgentOrchestrator:
                 "session_id": normalized.session_id,
             },
         )
+
+    def _runtime_mode(self) -> str:
+        raw = str(os.getenv("AGENT_RUNTIME_MODE", "hybrid") or "hybrid").strip().lower()
+        return raw if raw in {"legacy", "graph", "hybrid"} else "hybrid"
+
+    def _graph_error_response(self, request_payload: dict[str, Any], error_text: str, error_type: str) -> dict[str, Any]:
+        try:
+            normalized = self.message_normalizer.normalize(request_payload)
+        except Exception:
+            normalized = NormalizedMessage(
+                message=str(request_payload.get("message") or ""),
+                raw_message=str(request_payload.get("message") or ""),
+                conversation_id=str(request_payload.get("conversation_id") or request_payload.get("session_id") or ""),
+                session_id=str(request_payload.get("session_id") or request_payload.get("conversation_id") or ""),
+                user_id=str(request_payload.get("user_id") or "default_user"),
+            )
+        intent = IntentResult(intent="unknown", confidence=0.0, reason=error_text, recommended_route="graph_error")
+        plan = AgentPlan(route_type="graph_error", steps=["graph_runtime_error"])
+        response = self.response_builder.build(
+            AgentResponse(
+                success=False,
+                reply=error_text,
+                intent="unknown",
+                route="graph_error",
+                error_message=error_text,
+                debug={"exception_type": error_type} if normalized.debug else {},
+                conversation_id=normalized.conversation_id,
+                session_id=normalized.session_id,
+                source="graph_runtime",
+            ),
+            normalized,
+            intent,
+            plan,
+        )
+        if not normalized.debug:
+            response["debug"] = {}
+        return response

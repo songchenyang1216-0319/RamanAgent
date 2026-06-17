@@ -73,6 +73,9 @@
           </div>
           <button id="workspaceButton" type="button" class="pill-button">工作区文件</button>
           <button id="ramanPipelineButton" type="button" class="pill-button">Pipeline</button>
+          <button id="toolCatalogButton" type="button" class="pill-button">工具目录</button>
+          <button id="ramanLabButton" type="button" class="pill-button">Benchmark</button>
+          <button id="auditLogsButton" type="button" class="pill-button">审计</button>
           <button id="knowledgeBaseButton" type="button" class="pill-button">知识库</button>
           <button id="skillsManageBtn" type="button" class="pill-button">Skills 管理</button>
         </div>
@@ -118,6 +121,30 @@
             <button id="refreshTasksBtn" type="button" class="mini-ghost-button">刷新</button>
           </summary>
           <div id="taskCenterBody" class="dashboard-card-body"></div>
+        </details>
+
+        <details id="toolCatalogCard" class="dashboard-card">
+          <summary>
+            <span>工具目录 / Tool Schema</span>
+            <button id="refreshToolsBtn" type="button" class="mini-ghost-button">刷新</button>
+          </summary>
+          <div id="toolCatalogBody" class="dashboard-card-body"></div>
+        </details>
+
+        <details id="ramanLabCard" class="dashboard-card">
+          <summary>
+            <span>Raman Benchmark / 训练</span>
+            <button id="refreshRamanLabBtn" type="button" class="mini-ghost-button">刷新</button>
+          </summary>
+          <div id="ramanLabBody" class="dashboard-card-body"></div>
+        </details>
+
+        <details id="auditLogCard" class="dashboard-card">
+          <summary>
+            <span>审计日志</span>
+            <button id="refreshAuditLogsBtn" type="button" class="mini-ghost-button">刷新</button>
+          </summary>
+          <div id="auditLogBody" class="dashboard-card-body"></div>
         </details>
 
         <details class="dashboard-card" open>

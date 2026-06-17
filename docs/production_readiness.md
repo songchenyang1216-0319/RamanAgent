@@ -6,6 +6,20 @@
 - `.env.example` 只能放占位值，例如 `your_openai_api_key`，不要放真实 key。
 - 生产环境设置 `APP_ENV=production` 后，接口默认要求显式登录 token。
 - 不要开启过宽的 debug 输出；前端普通模式不会展示内部 debug。
+- 高风险工具动作必须走 `requires_confirmation`，直接 Tool API 会写审计日志。
+- 上传 Skill 的可执行脚本会通过 `backend/security/skill_sandbox.py` 限制路径、剥离敏感环境变量并设置超时。
+
+## 数据库与任务中心
+
+默认 SQLite：
+
+```env
+DATABASE_URL=sqlite:///storage/agent_memory.db
+TASK_QUEUE_BACKEND=local
+TASK_QUEUE_WORKERS=2
+```
+
+启动时会初始化统一表结构，任务中心写入 `tasks` 和 `task_steps`。长任务优先使用 `async_task=true`，再通过任务中心查看状态、事件和产物。
 
 ## RAG / Embedding
 
@@ -97,7 +111,16 @@ Windows PowerShell：
 - `.env.example` 安全检查
 - RAG/embedding/rerank smoke test
 - `backend.main` 导入检查
+- FastAPI health/chat/stream/algorithm/template/tool smoke test
 - 前端 JS 语法检查
+
+## Docker
+
+```powershell
+.\scripts\docker_up.ps1
+```
+
+默认 compose 会挂载 `storage`、`outputs`、`artifacts` 和 `data`，避免容器重建丢失模型文件和运行产物。详见 [deployment_docker.md](./deployment_docker.md)。
 
 ## 知识库导入
 
