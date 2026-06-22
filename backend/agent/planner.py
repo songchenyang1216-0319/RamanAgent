@@ -131,6 +131,15 @@ class Planner:
 
         if intent.intent == "document_processing":
             if normalized.has_file:
+                uploaded_doc_skill, _ = match_uploaded_skill(normalized.message, file_suffix=normalized.file_suffix)
+                if uploaded_doc_skill is not None and uploaded_doc_skill.skill_mode == "prompt_only":
+                    return AgentPlan(
+                        route_type="skill",
+                        skill_name=uploaded_doc_skill.name,
+                        skill_mode=uploaded_doc_skill.skill_mode,
+                        action_name="run_uploaded_skill",
+                        steps=["run_skill", "build_response"],
+                    )
                 document_action = "summarize"
                 if any(keyword in normalized.message for keyword in ("大纲", "目录", "结构")):
                     document_action = "outline"

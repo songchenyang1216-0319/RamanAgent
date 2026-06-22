@@ -17,6 +17,7 @@ COLLECTION_NAME = "ramanagent_rag_chunks"
 class VectorStore:
     def __init__(self, *, provider: str | None = None, persist_dir: str | Path | None = None) -> None:
         self.provider = str(provider or os.getenv("VECTOR_DB_PROVIDER") or "chroma").strip().lower()
+        self.collection_name = str(os.getenv("VECTOR_DB_COLLECTION") or COLLECTION_NAME).strip() or COLLECTION_NAME
         self.persist_dir = Path(persist_dir or os.getenv("VECTOR_DB_DIR") or PROJECT_ROOT / "storage" / "vector_db")
         if not self.persist_dir.is_absolute():
             self.persist_dir = PROJECT_ROOT / self.persist_dir
@@ -98,7 +99,7 @@ class VectorStore:
             vector_provider=self.provider,
             embedding_provider=os.getenv("EMBEDDING_PROVIDER", "mock"),
             embedding_model=os.getenv("EMBEDDING_MODEL", "mock-hash-embedding"),
-            collection_name=COLLECTION_NAME,
+            collection_name=self.collection_name,
             error_message=self._availability_error,
         )
         payload = stats.to_dict()
@@ -115,7 +116,7 @@ class VectorStore:
         except ModuleNotFoundError as exc:
             raise RuntimeError("当前环境未安装 chromadb，向量检索不可用。") from exc
         self._client = chromadb.PersistentClient(path=str(self.persist_dir))
-        self._collection = self._client.get_or_create_collection(COLLECTION_NAME)
+        self._collection = self._client.get_or_create_collection(self.collection_name)
         return self._collection
 
     def _metadata(self, chunk: DocumentChunk) -> dict[str, Any]:

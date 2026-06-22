@@ -145,7 +145,7 @@
         "answer_with_sources": true
       }
     },
-    "text-document-processor": {
+    "agent-skill-upload-test": {
       "enabled": true,
       "actions": {
         "run_uploaded_skill": true

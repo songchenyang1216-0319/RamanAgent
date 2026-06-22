@@ -1,0 +1,4 @@
+wavenumber,intensity
+1000,1.2
+1000,NaN
+1000,Inf

@@ -180,6 +180,8 @@ class WorkspaceManager:
             content_hash=content_hash,
         )
         if existing is not None:
+            if project_id is not None and existing.get("project_id") != project_id:
+                existing = self.file_catalog.update_file_project(existing["file_id"], project_id, user_id=user, is_admin=False)
             existing["processing_status"] = existing.get("processing_status") or "success"
             existing["processing_summary"] = existing.get("processing_summary") or "检测到重复上传，已复用工作区中的原文件。"
             active_files = self.read_active_files(user, conversation)

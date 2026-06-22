@@ -60,9 +60,15 @@ class ContextNode(GraphNode):
         self._try_legacy_contextual_shortcut(state)
         return state
 
+    def _is_table_followup_query(self, message: str) -> bool:
+        text = str(message or "").strip()
+        return text.startswith("按") or any(marker in text for marker in ("分组", "每个城市", "每个省", "各城市", "各省", "按城市", "按省份"))
+
     def _try_legacy_contextual_shortcut(self, state: GraphState) -> None:
         normalized = state.normalized_message
         if not normalized or bool(state.request_payload.get("explicit_has_file")):
+            return
+        if normalized.has_file and normalized.file_type == "table" and self._is_table_followup_query(normalized.message):
             return
         try:
             from backend.agent.agent_service import RamanAgentService

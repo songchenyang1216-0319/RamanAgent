@@ -14,5 +14,7 @@ class PipelineRunRepository(SQLiteRepository):
         item["pipeline_request_json"] = dumps_json(item.get("pipeline_request_json") or item.get("pipeline_request") or {})
         item["pipeline_result_json"] = dumps_json(item.get("pipeline_result_json") or item.get("pipeline_result") or {})
         item["artifacts_json"] = dumps_json(item.get("artifacts_json") or item.get("artifacts") or [])
+        item.pop("pipeline_request", None)
+        item.pop("pipeline_result", None)
+        item.pop("artifacts", None)
         return self.create(item)
-

@@ -174,6 +174,9 @@ class GraphRunner:
                 yield builder.event("status", content="发现可恢复问题，准备尝试修复。", data=dict(state.observations or {}))
             elif status == "need_user_input":
                 yield builder.event("status", content="需要补充信息后才能继续。", data=dict(state.observations or {}))
+                if state.errors:
+                    error_text = "；".join(item.get("message", "") for item in state.errors if item.get("message")) or "需要补充信息后才能继续。"
+                    yield builder.event("error", content=error_text, data={"node": node_name, "reason": state.observations.get("reason")})
             return
         if node_name == "repair" and state.repair_attempts:
             yield builder.event("tool_progress", content="已完成一次自动修复尝试。", data=dict(state.observations or {}))

@@ -2747,12 +2747,27 @@ function renderPipelineResult() {
   const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
   const images = artifacts.filter((item) => item.type === "image" && item.url);
   const tables = artifacts.filter((item) => item.type === "table");
+  const report = result.report && typeof result.report === "object" ? result.report : null;
+  const reportFinalSpectrum = report?.final_spectrum || result.final_spectrum || {};
+  const reportMeta = [
+    reportFinalSpectrum.point_count !== undefined ? `点数 ${reportFinalSpectrum.point_count}` : "",
+    reportFinalSpectrum.wavenumber_min !== undefined && reportFinalSpectrum.wavenumber_max !== undefined
+      ? `范围 ${reportFinalSpectrum.wavenumber_min} - ${reportFinalSpectrum.wavenumber_max}`
+      : "",
+  ].filter(Boolean).join(" · ");
   return `
     <div class="pipeline-result-summary ${result.success ? "success" : "failed"}">
       <strong>${escapeHtml(result.message || (result.success ? "运行完成" : "运行失败"))}</strong>
       <span>Run ID：${escapeHtml(result.run_id || "")} · 耗时：${escapeHtml(formatDurationMs(result.elapsed_ms) || "")}</span>
       ${result.error_message ? `<div class="pipeline-error">${escapeHtml(result.error_message)}</div>` : ""}
     </div>
+    ${report ? `
+      <section class="pipeline-report-summary">
+        <strong>${escapeHtml(report.title || "Raman Pipeline Report")}</strong>
+        <span>${escapeHtml(report.summary || result.message || "")}</span>
+        ${reportMeta ? `<small>${escapeHtml(reportMeta)}</small>` : ""}
+      </section>
+    ` : ""}
     ${warnings.length ? `<div class="pipeline-warning">${warnings.map(escapeHtml).join("；")}</div>` : ""}
     <div class="pipeline-step-result-list">
       ${steps.map((step) => `

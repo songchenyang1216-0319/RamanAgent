@@ -224,16 +224,34 @@ class RamanPipelineRunner:
     ) -> PipelineResult:
         step_metrics = [step.metrics for step in steps if step.metrics]
         message = "Raman Pipeline 运行完成。" if success else "Raman Pipeline 运行失败。"
+        failed_step = next((step.step_id for step in steps if step.status != "success"), None)
+        final_spectrum = _jsonable(build_final_spectrum(data))
+        pipeline_name = request.template_id or "custom_pipeline"
+        unique_warnings = list(dict.fromkeys([item for item in warnings if item]))
         result = PipelineResult(
             success=success,
             run_id=run_id,
+            pipeline_run_id=run_id,
             template_id=request.template_id,
+            pipeline_name=pipeline_name,
+            total_steps=len(request.steps),
+            completed_steps=sum(1 for step in steps if step.status == "success"),
+            failed_step=failed_step,
             message=message,
             steps=steps,
+            step_results=steps,
             metrics=_jsonable(merge_metrics(step_metrics)),
             artifacts=_jsonable(artifacts),
-            final_spectrum=_jsonable(build_final_spectrum(data)),
-            warnings=list(dict.fromkeys([item for item in warnings if item])),
+            report={
+                "title": f"Raman Pipeline Report - {pipeline_name}",
+                "summary": message,
+                "success": success,
+                "error_message": error_message,
+                "warnings": unique_warnings,
+                "final_spectrum": final_spectrum,
+            },
+            final_spectrum=final_spectrum,
+            warnings=unique_warnings,
             error_message=error_message,
             elapsed_ms=int((time.perf_counter() - started) * 1000),
         )

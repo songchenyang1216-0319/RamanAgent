@@ -318,7 +318,14 @@ class ModelRegistry:
             provider_id = spec["provider_id"]
             api_key = _env(spec["api_key_env"])
             base_url = _env(spec["base_url_env"], spec["default_base_url"])
-            available_models = _split_models(_env(spec["available_models_env"])) or list(spec["default_models"])
+            configured_models = _split_models(_env(spec["available_models_env"]))
+            available_models = configured_models or list(spec["default_models"])
+            for model_id in spec["default_models"]:
+                if model_id not in available_models:
+                    available_models.append(model_id)
+            for provider_key, model_id in _EXPLICIT_CATEGORY_OVERRIDES:
+                if provider_key == provider_id and model_id not in available_models:
+                    available_models.append(model_id)
             default_model = _env(spec["default_model_env"], spec["default_model"])
             if default_model not in available_models and available_models:
                 default_model = available_models[0]
@@ -378,13 +385,13 @@ class ModelRegistry:
         for item in provider.get("models") or []:
             if str(item.get("id") or "") == str(model_id or ""):
                 return deepcopy(item)
+        if (str(provider_id or "").strip().lower(), str(model_id or "").strip()) in _EXPLICIT_CATEGORY_OVERRIDES:
+            return _build_model_record(str(provider_id or "").strip().lower(), str(model_id or "").strip())
         return {}
 
     def list_available_vision_models(self) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         for provider in self._providers.values():
-            if not provider.get("configured"):
-                continue
             for model in provider.get("models") or []:
                 if model.get("supports_vision"):
                     items.append(

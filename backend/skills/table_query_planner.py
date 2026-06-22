@@ -449,7 +449,10 @@ class TableQueryPlanner:
             start = text.find(alias)
             while start >= 0:
                 existing = [candidate for candidate in targets if any(self._normalize_name(candidate) == self._normalize_name(column) for column in columns)]
-                if len(existing) == 1:
+                preferred = self._preferred_alias_column(alias, existing, columns)
+                if preferred:
+                    mentions.append(ColumnMention(raw_text=alias, column=preferred, start=start, end=start + len(alias), source="alias"))
+                elif len(existing) == 1:
                     mentions.append(ColumnMention(raw_text=alias, column=self._resolve_column_name(existing[0], columns), start=start, end=start + len(alias), source="alias"))
                 elif len(existing) > 1:
                     mentions.append(ColumnMention(raw_text=alias, column=None, start=start, end=start + len(alias), source="alias", ambiguous_candidates=[self._resolve_column_name(item, columns) or item for item in existing]))
@@ -459,6 +462,19 @@ class TableQueryPlanner:
             return None
         mentions.sort(key=lambda item: (item.start, 0 if item.source == "column" else 1, -(item.end - item.start)))
         return mentions[0]
+
+    def _preferred_alias_column(self, alias: str, existing: list[str], columns: list[str]) -> str | None:
+        preferences = {
+            "省份": ("province",),
+            "省": ("province",),
+            "城市": ("city",),
+            "市": ("city",),
+            "地区": ("province", "region", "city"),
+        }.get(alias, ())
+        for preferred in preferences:
+            if preferred in existing:
+                return self._resolve_column_name(preferred, columns)
+        return None
 
     def _find_groupby_column(self, text: str, columns: list[str]) -> str | None:
         if "按" in text:

@@ -38,11 +38,11 @@ def run_skill_subprocess(
     max_output_chars: int = 120_000,
     **kwargs: Any,
 ) -> subprocess.CompletedProcess:
-    cwd_path = validate_skill_path(cwd)
+    cwd_path = validate_skill_path(cwd, workspace_root=cwd)
     process = run_sandboxed_command(
         command,
         cwd=str(cwd_path),
-        policy=SandboxPolicy(allowed_read_paths=[str(PROJECT_ROOT)], allowed_write_paths=[str(PROJECT_ROOT / "outputs")], timeout_seconds=max(1, min(int(timeout), 300))),
+        policy=SandboxPolicy(allowed_read_paths=[str(PROJECT_ROOT), str(cwd_path)], allowed_write_paths=[str(PROJECT_ROOT / "outputs"), str(cwd_path)], timeout_seconds=max(1, min(int(timeout), 300))),
         **kwargs,
     )
     stdout = str(process.stdout or "")

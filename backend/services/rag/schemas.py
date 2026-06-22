@@ -67,6 +67,7 @@ class RAGSearchResult:
     rerank: dict[str, Any] = field(default_factory=dict)
     citations: list[dict[str, Any]] = field(default_factory=list)
     source_breakdown: dict[str, Any] = field(default_factory=dict)
+    latency_ms: int = 0
     error_message: str | None = None
 
     def to_dict(self) -> dict[str, Any]:

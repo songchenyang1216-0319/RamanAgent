@@ -1,24 +1,18 @@
-# RamanAgent Demo Data
+# Raman Demo Data
 
-本目录放可公开演示的合成 Raman CSV，不包含真实样品或敏感实验数据。
+本目录保存 RamanAgent 现场演示使用的合成 Raman 光谱数据。数据由确定性函数生成，只用于功能演示、测试和文档截图，不包含真实实验样本或敏感数据。
 
-## 文件
+## 文件说明
 
-- `demo_raman_methanol.csv`：合成 Raman 光谱，包含 `wavenumber` 和 `intensity` 两列，用于演示上传、基础预处理、峰识别、质量评估和报告生成流程。
+- `raman_demo_valid.csv`：格式正确、峰形清晰的合成 Raman 光谱，可用于 basic_preprocessing、peak_analysis 和 quality_check。
+- `raman_demo_with_noise.csv`：在 valid 光谱基础上加入周期噪声和尖峰，用于展示 SG 平滑、ALS 去基线和质量评估。
+- `raman_demo_invalid.csv`：故意构造的无效光谱，有效点不足，用于验证错误提示和失败中止。
+- `demo_raman_methanol.csv`：历史演示文件，保留用于向后兼容。
 
-## 最简 Raman CSV Demo
+## 推荐演示流程
 
-1. 启动后端并打开前端。
-2. 上传 `data/demo/demo_raman_methanol.csv`。
-3. 输入：`先对这个 Raman CSV 做 basic_preprocessing，不要预测`。
-4. 查看 SG 平滑、ALS 去基线、归一化后的步骤图和 Pipeline history。
-
-## 完整 Raman Pipeline Demo
-
-1. 上传 `demo_raman_methanol.csv`。
-2. 在 Pipeline 面板选择 `basic_preprocessing`。
-3. 查看每一步的 `algorithm_id`、`display_name`、`input_shape`、`output_shape`、`metrics` 和图像产物。
-4. 运行 `peak_analysis`，查看峰位、峰高、峰宽、峰面积和峰表。
-5. 运行 `quality_check`，查看 SNR、基线漂移、饱和风险、尖峰风险和质量总分。
-6. 使用报告入口生成 Markdown/HTML 报告，最终回答下方应展示 artifacts 和图像结果。
-
+1. 上传 `raman_demo_valid.csv`。
+2. 选择 `basic_preprocessing` 模板，执行 SG 平滑、ALS 去基线和 Min-Max 归一化。
+3. 运行 `peak_analysis`，查看峰识别图和峰表 artifact。
+4. 运行 `quality_check`，查看 SNR、背景漂移、尖峰等质量指标。
+5. 上传 `raman_demo_invalid.csv`，验证 Pipeline 会返回明确错误且不会继续执行依赖步骤。

@@ -41,11 +41,18 @@ class PipelineStepResult(BaseModel):
 class PipelineResult(BaseModel):
     success: bool
     run_id: str
+    pipeline_run_id: str | None = None
     template_id: str | None = None
+    pipeline_name: str | None = None
+    total_steps: int = 0
+    completed_steps: int = 0
+    failed_step: str | None = None
     message: str
     steps: list[PipelineStepResult] = Field(default_factory=list)
+    step_results: list[PipelineStepResult] = Field(default_factory=list)
     metrics: dict[str, Any] = Field(default_factory=dict)
     artifacts: list[dict[str, Any]] = Field(default_factory=list)
+    report: dict[str, Any] = Field(default_factory=dict)
     final_spectrum: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     error_message: str = ""

@@ -387,9 +387,13 @@ class LLMPlanner:
         )
 
     def _mentions_quality(self, text: str, lowered: str) -> bool:
+        if self._is_conceptual_raman_question(text, lowered):
+            return False
         return "质量" in text or "信噪比" in text or "snr" in lowered or "噪声" in text
 
     def _mentions_peak_analysis(self, text: str, lowered: str) -> bool:
+        if self._is_conceptual_raman_question(text, lowered):
+            return False
         return ("峰位" in text or "主要峰" in text or "标出来" in text or "标出" in text or "peak" in lowered) and "深度学习" not in text
 
     def _mentions_methanol_prediction(self, text: str, lowered: str) -> bool:
@@ -405,9 +409,16 @@ class LLMPlanner:
         return ("深度学习" in text or "deep learning" in lowered or "autoencoder" in lowered or "cdae" in lowered) and ("去噪" in text or "denoise" in lowered)
 
     def _mentions_sg_smoothing(self, text: str, lowered: str) -> bool:
+        if self._is_conceptual_raman_question(text, lowered):
+            return False
         if "als" in lowered or "去基线" in text or "归一化" in text or "z-score" in lowered or "zscore" in lowered:
             return False
         return ("sg" in lowered or "savitzky" in lowered or "平滑" in text) and ("光谱" in text or "raman" in lowered or "spectrum" in lowered)
+
+    def _is_conceptual_raman_question(self, text: str, lowered: str) -> bool:
+        conceptual_markers = ("解释", "是什么", "什么是", "原理", "区别", "为什么", "怎么理解", "如何理解", "介绍", "请说明")
+        execution_markers = ("这个文件", "这个csv", "这个 csv", "上传", "刚才", "对这个", "把这个", "执行", "处理", "进行", "不要预测")
+        return any(marker in text for marker in conceptual_markers) and not any(marker in text for marker in execution_markers)
 
     def _mentions_document_qa(self, normalized: NormalizedMessage, text: str, lowered: str) -> bool:
         if normalized.rag_scope in {"conversation", "knowledge_base", "mixed"}:

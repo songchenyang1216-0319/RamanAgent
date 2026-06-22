@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
 from backend.db.database import get_db_connection, init_agent_memory_db
@@ -109,7 +110,8 @@ class RAGRetriever:
 
     def _keyword_conversation(self, query: str, *, user_id: str, conversation_id: str, file_ids: list[str] | None, top_k: int) -> list[RetrievedChunk]:
         rows = self.file_registry.search_chunks(user_id=user_id, conversation_id=conversation_id, query=query, file_ids=file_ids, limit=top_k)
-        return [self._row_to_retrieved(row, rag_scope="conversation") for row in rows]
+        filtered = [row for row in rows if self._keyword_match_is_relevant(query, str(row.get("text") or ""))]
+        return [self._row_to_retrieved(row, rag_scope="conversation") for row in filtered]
 
     def _keyword_knowledge_base(self, query: str, *, knowledge_base_ids: list[str], top_k: int) -> list[RetrievedChunk]:
         init_agent_memory_db()
@@ -128,9 +130,21 @@ class RAGRetriever:
             rows = connection.execute(sql, params).fetchall()
             if not rows and like_terms:
                 rows = connection.execute(f"SELECT * FROM knowledge_base_chunks WHERE knowledge_base_id IN ({placeholders}) ORDER BY id ASC LIMIT ?", [*knowledge_base_ids, top_k]).fetchall()
-            return [self._row_to_retrieved(dict(row), rag_scope="knowledge_base") for row in rows]
+            filtered = [dict(row) for row in rows if self._keyword_match_is_relevant(query, str(dict(row).get("text") or ""))]
+            return [self._row_to_retrieved(row, rag_scope="knowledge_base") for row in filtered]
         finally:
             connection.close()
+
+    def _keyword_match_is_relevant(self, query: str, text: str) -> bool:
+        query_text = str(query or "").strip().lower()
+        chunk_text = str(text or "").strip().lower()
+        if not query_text or not chunk_text:
+            return False
+        alnum_tokens = [token for token in re.findall(r"[a-z0-9][a-z0-9_.-]{1,}", query_text) if len(token) >= 2]
+        if alnum_tokens:
+            return any(token in chunk_text for token in alnum_tokens)
+        chinese_terms = [term for term in re.findall(r"[\u4e00-\u9fff]{2,}", query_text) if len(term) >= 2]
+        return any(term in chunk_text for term in chinese_terms[:6]) if chinese_terms else True
 
     def _row_to_retrieved(self, row: dict[str, Any], *, rag_scope: str) -> RetrievedChunk:
         metadata = {}

@@ -237,6 +237,7 @@ class RAGService:
         top_k: int | None = None,
         rag_scope: str = "conversation",
     ) -> RAGSearchResult:
+        started = time.perf_counter()
         rag_scope = rag_scope if rag_scope in {"conversation", "knowledge_base", "mixed"} else "conversation"
         if rag_scope in {"knowledge_base", "mixed"} and not knowledge_base_ids:
             knowledge_base_ids = self._bound_knowledge_base_ids(user_id=user_id, conversation_id=conversation_id)
@@ -257,7 +258,8 @@ class RAGService:
             retrieval_mode=self.retriever.last_retrieval_mode,
             rerank=dict(self.retriever.last_rerank_info or {}),
             citations=citations,
-            source_breakdown=self._source_breakdown(chunks),
+            source_breakdown=self._source_breakdown(chunks, rerank=dict(self.retriever.last_rerank_info or {})),
+            latency_ms=int((time.perf_counter() - started) * 1000),
             error_message=None if chunks else "没有检索到足够相关的片段。",
         )
         self._record_query(user_id, conversation_id, query, file_ids, knowledge_base_ids, rag_scope, result)
@@ -295,10 +297,17 @@ class RAGService:
                 query,
                 answer_text,
                 rag_scope,
+                citations=[],
                 retrieved_chunks=[],
                 source_breakdown=search_result.source_breakdown,
                 retrieval_mode=search_result.retrieval_mode,
                 rerank=search_result.rerank,
+                rag={
+                    "top_k": int(top_k or os.getenv("RAG_TOP_K", "6")),
+                    "latency_ms": int((time.perf_counter() - started) * 1000),
+                    "search_latency_ms": search_result.latency_ms,
+                    "no_answer": True,
+                },
                 error_message=search_result.error_message,
             )
         chunk_dicts = [chunk.to_dict() for chunk in search_result.chunks]
@@ -335,6 +344,8 @@ class RAGService:
                 "top_k": int(top_k or os.getenv("RAG_TOP_K", "6")),
                 "score_threshold": float(os.getenv("RAG_SCORE_THRESHOLD", "0.25")),
                 "rerank": search_result.rerank,
+                "latency_ms": latency_ms,
+                "search_latency_ms": search_result.latency_ms,
                 **self.embedding_service.get_model_info(),
                 "vector_provider": self.vector_store.provider,
             },
@@ -515,7 +526,7 @@ class RAGService:
         return [
             {
                 "chunk_id": chunk.chunk_id,
-                "source_type": chunk.rag_scope or chunk.source_type,
+                "source_type": chunk.source_group or ("knowledge_base" if chunk.rag_scope == "knowledge_base" else "conversation_file"),
                 "source_id": chunk.knowledge_base_id or chunk.file_id or chunk.kb_file_id,
                 "file_id": chunk.file_id,
                 "kb_file_id": chunk.kb_file_id,
@@ -529,14 +540,16 @@ class RAGService:
                 "sheet": chunk.sheet,
                 "section": chunk.section,
                 "score": chunk.score,
+                "score_label": "关键词匹配" if chunk.score is None else "",
                 "distance": chunk.distance,
+                "retrieval_mode": chunk.retrieval_mode,
                 "preview": chunk.text[:240],
                 "content_excerpt": chunk.text[:500],
             }
             for chunk in chunks
         ]
 
-    def _source_breakdown(self, chunks: list[RetrievedChunk]) -> dict[str, Any]:
+    def _source_breakdown(self, chunks: list[RetrievedChunk], *, rerank: dict[str, Any] | None = None) -> dict[str, Any]:
         conversation_files = []
         knowledge_bases = []
         conversation_ids: set[str] = set()
@@ -555,6 +568,9 @@ class RAGService:
             "knowledge_base_count": len(knowledge_bases),
             "conversation_unique_file_count": len(conversation_ids),
             "knowledge_base_unique_count": len(knowledge_base_ids),
+            "candidate_count": int((rerank or {}).get("input_count") or len(chunks)),
+            "rerank_input_count": int((rerank or {}).get("input_count") or len(chunks)),
+            "rerank_output_count": int((rerank or {}).get("output_count") or len(chunks)),
             "conversation_files": conversation_files,
             "knowledge_bases": knowledge_bases,
         }

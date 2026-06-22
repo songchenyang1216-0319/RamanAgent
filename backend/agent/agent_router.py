@@ -370,6 +370,9 @@ def _message_mentions_file_context(message: str) -> bool:
         "uploaded file",
         "previous file",
     )
+    stripped = str(message or "").strip()
+    if stripped.startswith("按") or any(marker in stripped for marker in ("分组", "每个城市", "每个省", "各城市", "各省", "按城市", "按省份")):
+        return True
     return any(marker in text for marker in markers)
 
 
@@ -3153,6 +3156,20 @@ async def analyze_file(
             debug=False,
         )
         append_message(resolved_session_id, "assistant", response_payload.get("reply", ""))
+        session_analysis = _build_session_analysis_payload(response_payload, resolved_session_id)
+        update_session(resolved_session_id, "last_analysis", session_analysis)
+        update_session(resolved_session_id, "last_file", response_payload.get("saved_file"))
+        update_session(resolved_session_id, "last_report", response_payload.get("report"))
+        _apply_task_state_from_response(resolved_session_id, response_payload)
+        return response_payload
+    if _is_service_run_tool_overridden():
+        response_payload = _analyze_csv_with_service_tools(
+            save_path=save_path,
+            message=message,
+            session_id=resolved_session_id,
+            metadata=experiment_metadata,
+        )
+        append_message(resolved_session_id, "assistant", response_payload.get("reply") or response_payload.get("llm_explanation") or "")
         session_analysis = _build_session_analysis_payload(response_payload, resolved_session_id)
         update_session(resolved_session_id, "last_analysis", session_analysis)
         update_session(resolved_session_id, "last_file", response_payload.get("saved_file"))

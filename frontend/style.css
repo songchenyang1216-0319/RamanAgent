@@ -2317,6 +2317,7 @@ button {
 .pipeline-algorithm-item,
 .pipeline-step-result,
 .pipeline-result-summary,
+.pipeline-report-summary,
 .pipeline-history-item,
 .pipeline-table-card {
   border: 1px solid var(--line-soft);
@@ -2432,11 +2433,24 @@ button {
 }
 
 .pipeline-result-summary,
+.pipeline-report-summary,
 .pipeline-step-result,
 .pipeline-history-item {
   display: grid;
   gap: 6px;
   padding: 10px 12px;
+}
+
+.pipeline-report-summary {
+  border-color: rgba(15, 111, 136, 0.14);
+  background: rgba(233, 245, 248, 0.64);
+}
+
+.pipeline-report-summary span,
+.pipeline-report-summary small {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .pipeline-result-summary.success,
