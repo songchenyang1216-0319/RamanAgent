@@ -1,16 +1,23 @@
 """FastAPI 应用入口。"""
 
 import os
+import logging
+from collections import defaultdict
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from backend.agent.agent_router import router as agent_router
+from backend.api.agent_compat_api import router as agent_compat_router
+from backend.api.agent_skill_compat_api import router as agent_skill_compat_router
 from backend.api.audit_api import router as audit_router
 from backend.api.auth_api import router as auth_router
+from backend.api.chat_api import router as chat_router
 from backend.api.confirmation_api import router as confirmation_router
 from backend.api.conversation_api import router as conversation_router
+from backend.api.file_analysis_api import agent_router as file_analysis_legacy_router
+from backend.api.file_analysis_api import files_router as file_analysis_router
 from backend.api.file_api import router as file_router
 from backend.api.knowledge_base_api import router as knowledge_base_router
 from backend.api.llm_api import router as llm_router
@@ -39,6 +46,7 @@ from raman_core.methanol.config import FIGURE_DIR, OUTPUT_DIR, PROJECT_ROOT, REP
 
 
 ensure_dirs()
+logger = logging.getLogger(__name__)
 
 
 app = FastAPI(title="RamanAgent API")
@@ -54,12 +62,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(chat_router)
+app.include_router(agent_compat_router)
+app.include_router(agent_skill_compat_router)
+app.include_router(file_analysis_legacy_router)
 app.include_router(agent_router)
 app.include_router(audit_router)
 app.include_router(auth_router)
 app.include_router(confirmation_router)
 app.include_router(conversation_router)
 app.include_router(methanol_router)
+app.include_router(file_analysis_router)
 app.include_router(file_router)
 app.include_router(knowledge_base_router)
 app.include_router(memory_router)
@@ -81,6 +94,29 @@ app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 app.mount("/static/figures", StaticFiles(directory=str(FIGURE_DIR)), name="static-figures")
 app.mount("/static/reports", StaticFiles(directory=str(REPORT_DIR)), name="static-reports")
 app.mount("/app", StaticFiles(directory=str(PROJECT_ROOT / "frontend"), html=True), name="frontend-app")
+
+
+def assert_no_duplicate_routes() -> None:
+    """Detect duplicate HTTP method + path registrations before requests arrive."""
+    seen: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for route in app.routes:
+        path = str(getattr(route, "path", "") or "")
+        for method in sorted(getattr(route, "methods", None) or []):
+            if method in {"HEAD", "OPTIONS"}:
+                continue
+            seen[(method, path)].append(str(getattr(route, "name", "") or route))
+    duplicates = {key: names for key, names in seen.items() if len(names) > 1}
+    if not duplicates:
+        return
+    details = "; ".join(f"{method} {path}: {names}" for (method, path), names in sorted(duplicates.items()))
+    message = f"Duplicate API routes detected: {details}"
+    if os.getenv("PYTEST_CURRENT_TEST") or str(os.getenv("APP_ENV", "")).lower() == "test":
+        raise RuntimeError(message)
+    logger.error(message)
+    raise RuntimeError(message)
+
+
+assert_no_duplicate_routes()
 
 
 @app.on_event("startup")
