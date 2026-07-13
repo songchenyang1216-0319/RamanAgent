@@ -12,6 +12,8 @@ if str(PROJECT_ROOT) not in sys.path:
 sys.dont_write_bytecode = True
 
 os.environ.setdefault("APP_ENV", "development")
+os.environ.setdefault("ALLOW_ANONYMOUS_DEV", "true")
+os.environ.setdefault("AUTH_SECRET", "test_auth_secret_for_unit_tests_32_chars")
 os.environ.setdefault("VECTOR_DB_PROVIDER", "mock")
 os.environ.setdefault("EMBEDDING_PROVIDER", "mock")
 os.environ.setdefault("EMBEDDING_MODEL", "mock-hash-embedding")

@@ -39,11 +39,18 @@ COPY raman_core /app/raman_core
 COPY scripts /app/scripts
 COPY apps /app/apps
 COPY docs /app/docs
+COPY alembic.ini /app/alembic.ini
+COPY alembic /app/alembic
 COPY artifacts /app/artifacts
 COPY data /app/data
 COPY README.md ARCHITECTURE.md AGENTS.md /app/
 
 RUN mkdir -p /app/storage /app/outputs /app/data/raw /app/data/demo /app/artifacts
+RUN addgroup --system ramanagent \
+    && adduser --system --ingroup ramanagent ramanagent \
+    && chown -R ramanagent:ramanagent /app/storage /app/outputs /app/artifacts
+
+USER ramanagent
 
 EXPOSE 8000
 

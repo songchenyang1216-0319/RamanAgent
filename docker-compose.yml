@@ -1,17 +1,45 @@
 services:
-  ramanagent:
+  migration:
     build:
       context: .
       dockerfile: Dockerfile
     image: ramanagent:latest
-    container_name: ramanagent
+    container_name: ramanagent-migration
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      AUTH_SECRET: ${AUTH_SECRET:?AUTH_SECRET must be set}
+      DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:?DEFAULT_ADMIN_PASSWORD must be set}
+      AGENT_RUNTIME_MODE: graph
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://ramanagent:ramanagent@postgres:5432/ramanagent}
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ramanagent:latest
+    container_name: ramanagent-api
     env_file:
       - .env
     environment:
       APP_ENV: production
       BACKEND_HOST: 0.0.0.0
       BACKEND_PORT: 8000
-      DATABASE_URL: sqlite:////app/storage/agent_memory.db
+      AUTH_SECRET: ${AUTH_SECRET:?AUTH_SECRET must be set}
+      DEFAULT_ADMIN_USERNAME: ${DEFAULT_ADMIN_USERNAME:-admin}
+      DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:?DEFAULT_ADMIN_PASSWORD must be set}
+      AGENT_RUNTIME_MODE: graph
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://ramanagent:ramanagent@postgres:5432/ramanagent}
+      TASK_QUEUE_BACKEND: ${TASK_QUEUE_BACKEND:-celery}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/2}
       VECTOR_DB_PROVIDER: ${VECTOR_DB_PROVIDER:-chroma}
       VECTOR_DB_DIR: ${VECTOR_DB_DIR:-/app/storage/vector_db}
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
@@ -30,6 +58,13 @@ services:
       - ./outputs:/app/outputs
       - ./artifacts:/app/artifacts
       - ./data:/app/data
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"]
@@ -37,3 +72,72 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+
+  worker:
+    image: ramanagent:latest
+    container_name: ramanagent-worker
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      AUTH_SECRET: ${AUTH_SECRET:?AUTH_SECRET must be set}
+      DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:?DEFAULT_ADMIN_PASSWORD must be set}
+      AGENT_RUNTIME_MODE: graph
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://ramanagent:ramanagent@postgres:5432/ramanagent}
+      TASK_QUEUE_BACKEND: ${TASK_QUEUE_BACKEND:-celery}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/2}
+      VECTOR_DB_PROVIDER: ${VECTOR_DB_PROVIDER:-chroma}
+      VECTOR_DB_DIR: ${VECTOR_DB_DIR:-/app/storage/vector_db}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}
+      OCR_PROVIDER: ${OCR_PROVIDER:-none}
+      PDF_EXPORT_PROVIDER: ${PDF_EXPORT_PROVIDER:-none}
+    command: ["celery", "-A", "backend.tasks.celery_app.celery_app", "worker", "--loglevel=INFO", "--concurrency=1"]
+    volumes:
+      - ./storage:/app/storage
+      - ./outputs:/app/outputs
+      - ./artifacts:/app/artifacts
+      - ./data:/app/data
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: ramanagent-postgres
+    environment:
+      POSTGRES_DB: ramanagent
+      POSTGRES_USER: ramanagent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ramanagent}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ramanagent -d ramanagent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: ramanagent-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres-data:
+  redis-data:

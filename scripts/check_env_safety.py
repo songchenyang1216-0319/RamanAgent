@@ -8,7 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
-    re.compile(r"(?im)^(?:[A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET)[A-Z0-9_]*)[^\S\r\n]*=[^\S\r\n]*(?!$)(?!your_)(?!changeme)(?!example)(?!placeholder)([A-Za-z0-9_\-]{16,})[^\S\r\n]*$"),
+    re.compile(r"(?im)^(?:[A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET)[A-Z0-9_]*)[^\S\r\n]*=[^\S\r\n]*(?!$)(?!your_)(?!changeme)(?!change_me)(?!example)(?!placeholder)([A-Za-z0-9_\-]{16,})[^\S\r\n]*$"),
 ]
 
 

@@ -89,6 +89,23 @@ Graph 节点包括 `NormalizeNode`、`ContextNode`、`IntentNode`、`PlannerNode
 
 长耗时操作可以通过 `async_task=true` 交给任务中心执行，并通过 `/api/tasks/{task_id}/events` 输出 SSE 事件。
 
+当前任务表已预留 `attempt`、`max_attempts`、`idempotency_key`、`cancel_requested`、`heartbeat_at`、`locked_by`、`lease_until`、`retry_at`、`error_code`、`failed_reason`、`parent_task_id` 和 `trace_id` 等生产化字段。`backend/tasks/worker.py` 提供迁移期 worker 入口；完整 Redis/Celery 持久队列仍是后续升级项。
+
+生产启动安全校验位于：
+
+- [backend/security/startup_checks.py](./backend/security/startup_checks.py)
+
+生产/预发环境必须配置强 `AUTH_SECRET`、非默认管理员密码、Graph Runtime 和非 mock RAG provider。本地匿名开发必须显式设置 `ALLOW_ANONYMOUS_DEV=true`。
+
+第二阶段生产化新增：
+
+- SQLAlchemy 2.x ORM 映射：`backend/db/orm.py`
+- Alembic migration：`alembic/versions/*`
+- Access/Refresh Token Rotation：`backend/services/user_service.py`
+- 统一 Ownership Guard：`backend/security/ownership_guard.py`
+- TaskQueueBackend + Celery 可选 backend：`backend/tasks/task_queue.py`
+- 持久 task events 和 SSE 恢复：`backend/repositories/task_repository.py`、`backend/api/task_api.py`
+
 ### 3.1 Message Normalizer
 
 文件：

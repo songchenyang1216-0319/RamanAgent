@@ -14,6 +14,8 @@ from pydantic import BaseModel
 
 from backend.api.auth_dependencies import get_request_user_context
 from backend.db.database import get_db_connection, init_agent_memory_db
+from backend.security.ownership_guard import ownership_guard
+from backend.security.resource_scope import ResourceScope
 from backend.services.file_converter import FileConverterService
 from backend.services.file_service import FileCatalogService
 from backend.services.ocr import OCRService
@@ -28,6 +30,10 @@ router = APIRouter(prefix="/api/files", tags=["files"])
 workspace_manager = WorkspaceManager()
 file_catalog = FileCatalogService()
 file_converter = FileConverterService()
+
+
+def _scope(current_user: dict) -> ResourceScope:
+    return ResourceScope.from_auth_context(current_user)
 
 
 class FileConvertRequest(BaseModel):
@@ -171,6 +177,8 @@ async def upload_workspace_file(
 @router.post("/convert")
 def convert_file(payload: FileConvertRequest, current_user: dict = Depends(get_request_user_context)) -> dict:
     effective_user_id = current_user["user_id"] if current_user.get("authenticated") else (payload.user_id or DEFAULT_USER_ID)
+    if current_user.get("authenticated"):
+        ownership_guard.require_file_owner(payload.file_id, _scope(current_user), file_catalog=file_catalog)
     try:
         result = file_converter.convert_file(
             file_id=payload.file_id,
@@ -200,6 +208,8 @@ def run_file_ocr(
     current_user: dict = Depends(get_request_user_context),
 ) -> dict:
     effective_user_id = current_user["user_id"] if current_user.get("authenticated") else (payload.user_id or DEFAULT_USER_ID)
+    if current_user.get("authenticated"):
+        ownership_guard.require_file_owner(file_id, _scope(current_user), file_catalog=file_catalog)
     if async_task:
         task = get_task_manager().create_task(
             TaskCreateRequest(
@@ -324,7 +334,7 @@ def list_files(
 
 @router.get("/{file_id}")
 def get_file(file_id: str, current_user: dict = Depends(get_request_user_context)) -> dict:
-    file_item = file_catalog.get_file_for_user(file_id, user_id=current_user["user_id"], is_admin=current_user["is_admin"])
+    file_item = ownership_guard.require_file_owner(file_id, _scope(current_user), file_catalog=file_catalog) if current_user.get("authenticated") else file_catalog.get_file_for_user(file_id, user_id=current_user["user_id"], is_admin=current_user["is_admin"])
     if file_item is None:
         raise HTTPException(status_code=404, detail=error_detail("文件不存在。", error_code="FILE_NOT_FOUND", suggestion="请刷新文件列表后重试。"))
     return {"success": True, "file": file_item}
@@ -332,7 +342,7 @@ def get_file(file_id: str, current_user: dict = Depends(get_request_user_context
 
 @router.get("/{file_id}/download")
 def download_file(file_id: str, current_user: dict = Depends(get_request_user_context)):
-    file_item = file_catalog.get_file_for_user(file_id, user_id=current_user["user_id"], is_admin=current_user["is_admin"])
+    file_item = ownership_guard.require_file_owner(file_id, _scope(current_user), file_catalog=file_catalog) if current_user.get("authenticated") else file_catalog.get_file_for_user(file_id, user_id=current_user["user_id"], is_admin=current_user["is_admin"])
     if file_item is None:
         raise HTTPException(
             status_code=404,
@@ -360,7 +370,7 @@ def download_file(file_id: str, current_user: dict = Depends(get_request_user_co
 @router.delete("/{file_id}")
 def delete_file(file_id: str, current_user: dict = Depends(get_request_user_context)) -> dict:
     try:
-        file_item = file_catalog.get_file_for_user(file_id, user_id=current_user["user_id"], is_admin=current_user["is_admin"])
+        file_item = ownership_guard.require_file_owner(file_id, _scope(current_user), file_catalog=file_catalog) if current_user.get("authenticated") else file_catalog.get_file_for_user(file_id, user_id=current_user["user_id"], is_admin=current_user["is_admin"])
         if file_item is None:
             raise KeyError(file_id)
         deleted = file_catalog.delete_file(file_id)
@@ -379,7 +389,7 @@ def delete_file(file_id: str, current_user: dict = Depends(get_request_user_cont
 @router.get("/{file_id}/preview")
 def preview_file(file_id: str, current_user: dict = Depends(get_request_user_context)) -> dict:
     try:
-        file_item = file_catalog.get_file_for_user(file_id, user_id=current_user["user_id"], is_admin=current_user["is_admin"])
+        file_item = ownership_guard.require_file_owner(file_id, _scope(current_user), file_catalog=file_catalog) if current_user.get("authenticated") else file_catalog.get_file_for_user(file_id, user_id=current_user["user_id"], is_admin=current_user["is_admin"])
         if file_item is None:
             raise KeyError(file_id)
         return file_catalog.preview_file(file_id)
@@ -403,7 +413,7 @@ def activate_file(
     current_user: dict = Depends(get_request_user_context),
 ) -> dict:
     effective_user_id = current_user["user_id"] if current_user.get("authenticated") else user_id
-    file_item = file_catalog.get_file_for_user(file_id, user_id=effective_user_id, is_admin=current_user["is_admin"])
+    file_item = ownership_guard.require_file_owner(file_id, _scope(current_user), file_catalog=file_catalog) if current_user.get("authenticated") else file_catalog.get_file_for_user(file_id, user_id=effective_user_id, is_admin=current_user["is_admin"])
     if file_item is None:
         raise HTTPException(
             status_code=404,

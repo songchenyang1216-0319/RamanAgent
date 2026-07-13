@@ -34,8 +34,10 @@ from backend.api.task_api import router as task_router
 from backend.api.tool_api import router as tool_router
 from backend.api.workspace_api import router as workspace_router
 from backend.api.history_api import router as history_router
+from backend.api.health_api import router as health_router
 from backend.api.methanol_api import router as methanol_router
 from backend.db.init_db import init_database
+from backend.security.startup_checks import assert_database_revision_current, assert_runtime_security, get_app_env
 from backend.services.user_service import UserService
 from backend.model_registry.model_registry_router import router as model_registry_router
 from backend.services.model_registry_service import ModelRegistryService
@@ -89,6 +91,7 @@ app.include_router(task_router)
 app.include_router(tool_router)
 app.include_router(workspace_router)
 app.include_router(history_router)
+app.include_router(health_router)
 app.include_router(model_registry_router)
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 app.mount("/static/figures", StaticFiles(directory=str(FIGURE_DIR)), name="static-figures")
@@ -122,7 +125,10 @@ assert_no_duplicate_routes()
 @app.on_event("startup")
 def startup() -> None:
     """应用启动时初始化历史数据库和统一持久化层。"""
-    init_database()
+    assert_runtime_security()
+    assert_database_revision_current()
+    if get_app_env() not in {"production", "prod", "staging"}:
+        init_database()
     init_history_db()
     init_agent_memory_db()
     ModelRegistryService().load_registry()

@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import Header, HTTPException
 
+from backend.security.startup_checks import is_truthy
 from backend.services.user_service import UserService
 from backend.services.workspace_manager import DEFAULT_USER_ID
 
@@ -43,7 +44,7 @@ def get_request_user_context(authorization: str | None = Header(default=None)) -
             "app_env": app_env,
         }
 
-    if app_env == "development":
+    if app_env == "development" and is_truthy(os.getenv("ALLOW_ANONYMOUS_DEV")):
         fallback = user_service.ensure_default_admin(app_env=app_env) or {
             "user_id": DEFAULT_USER_ID,
             "username": "admin",
@@ -58,6 +59,9 @@ def get_request_user_context(authorization: str | None = Header(default=None)) -
             "is_admin": True,
             "app_env": app_env,
         }
+
+    if app_env == "development":
+        raise HTTPException(status_code=401, detail={"message": "匿名开发模式未启用。", "error_code": "AUTH_ANONYMOUS_DEV_DISABLED", "error_message": "匿名开发模式未启用。", "suggestion": "本地开发如需免登录，请显式设置 ALLOW_ANONYMOUS_DEV=true。"})
 
     raise HTTPException(status_code=401, detail={"message": "当前接口需要登录后访问。", "error_code": "AUTH_REQUIRED", "error_message": "当前接口需要登录后访问。", "suggestion": "请先注册或登录。"})
 

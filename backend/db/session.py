@@ -10,10 +10,15 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+from functools import lru_cache
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 from urllib.parse import urlparse
+
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
 
 from backend.db.database import DB_PATH, ensure_database_dir
 
@@ -27,6 +32,23 @@ def get_database_url() -> str:
     """
 
     return str(os.getenv("DATABASE_URL") or f"sqlite:///{DB_PATH.as_posix()}")
+
+
+def normalize_sqlalchemy_url(database_url: str | None = None) -> str:
+    url = str(database_url or get_database_url())
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url[len("postgresql://") :]
+    if url.startswith("sqlite:///"):
+        return url
+    if url.startswith("sqlite://"):
+        return url
+    if "://" not in url:
+        return f"sqlite:///{Path(url).as_posix()}"
+    return url
+
+
+def is_sqlite_url(database_url: str | None = None) -> bool:
+    return normalize_sqlalchemy_url(database_url).startswith("sqlite")
 
 
 def _sqlite_path_from_url(database_url: str) -> Path:
@@ -60,6 +82,50 @@ def get_connection(database_url: str | None = None) -> sqlite3.Connection:
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA journal_mode = WAL")
     return connection
+
+
+@lru_cache(maxsize=8)
+def get_engine(database_url: str | None = None) -> Engine:
+    url = normalize_sqlalchemy_url(database_url)
+    connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
+    kwargs: dict[str, object] = {
+        "echo": str(os.getenv("DATABASE_ECHO", "false")).strip().lower() == "true",
+        "future": True,
+        "pool_pre_ping": True,
+        "connect_args": connect_args,
+    }
+    if not url.startswith("sqlite"):
+        kwargs.update(
+            {
+                "pool_size": int(os.getenv("DB_POOL_SIZE", "10") or "10"),
+                "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "20") or "20"),
+                "pool_recycle": int(os.getenv("DB_POOL_RECYCLE_SECONDS", "1800") or "1800"),
+            }
+        )
+    return create_engine(url, **kwargs)
+
+
+@lru_cache(maxsize=8)
+def get_session_factory(database_url: str | None = None) -> sessionmaker[Session]:
+    return sessionmaker(bind=get_engine(database_url), autoflush=False, expire_on_commit=False, future=True)
+
+
+@contextmanager
+def sqlalchemy_session_scope(database_url: str | None = None) -> Iterator[Session]:
+    session = get_session_factory(database_url)()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def get_db_session() -> Iterator[Session]:
+    with sqlalchemy_session_scope() as session:
+        yield session
 
 
 @contextmanager

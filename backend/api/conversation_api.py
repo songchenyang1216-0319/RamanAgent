@@ -18,6 +18,8 @@ from backend.agent.session_store import (
     update_session,
 )
 from backend.api.auth_dependencies import get_request_user_context
+from backend.security.ownership_guard import ownership_guard
+from backend.security.resource_scope import ResourceScope
 from backend.services.workspace_manager import DEFAULT_USER_ID, WorkspaceManager
 
 
@@ -54,6 +56,10 @@ def _ensure_owner(session: dict[str, Any] | None, user_id: str, current_user: di
     if str(session.get("user_id") or DEFAULT_USER_ID) != str(user_id):
         raise HTTPException(status_code=403, detail="无权访问该会话。")
     return session
+
+
+def _scope(current_user: dict[str, Any]) -> ResourceScope:
+    return ResourceScope.from_auth_context(current_user)
 
 
 @router.get("")
@@ -104,7 +110,11 @@ def get_conversation(
     current_user: dict = Depends(get_request_user_context),
 ) -> dict[str, Any]:
     effective_user_id = _effective_user_id(current_user, user_id)
-    session = _ensure_owner(get_session(conversation_id), effective_user_id, current_user)
+    if current_user.get("authenticated"):
+        session = ownership_guard.require_conversation_owner(conversation_id, _scope(current_user))
+        effective_user_id = str(session.get("user_id") or effective_user_id)
+    else:
+        session = _ensure_owner(get_session(conversation_id), effective_user_id, current_user)
     workspace = workspace_manager.read_workspace_context(effective_user_id, conversation_id)
     return {
         "success": True,
@@ -129,7 +139,10 @@ def get_conversation(
 def update_conversation(conversation_id: str, payload: UpdateConversationRequest, current_user: dict = Depends(get_request_user_context)) -> dict[str, Any]:
     session = get_session(conversation_id)
     user_id = str((session or {}).get("user_id") or DEFAULT_USER_ID)
-    _ensure_owner(session, user_id, current_user)
+    if current_user.get("authenticated"):
+        ownership_guard.require_conversation_owner(conversation_id, _scope(current_user))
+    else:
+        _ensure_owner(session, user_id, current_user)
     if payload.title is not None:
         session = rename_session(conversation_id, payload.title)
     if payload.is_deleted is not None:
@@ -152,7 +165,10 @@ def update_conversation(conversation_id: str, payload: UpdateConversationRequest
 def remove_conversation(conversation_id: str, current_user: dict = Depends(get_request_user_context)) -> dict[str, Any]:
     session = get_session(conversation_id)
     user_id = str((session or {}).get("user_id") or DEFAULT_USER_ID)
-    _ensure_owner(session, user_id, current_user)
+    if current_user.get("authenticated"):
+        ownership_guard.require_conversation_owner(conversation_id, _scope(current_user))
+    else:
+        _ensure_owner(session, user_id, current_user)
     deleted = delete_session(conversation_id)
     return {
         "success": True,
@@ -171,7 +187,10 @@ def list_messages(
     current_user: dict = Depends(get_request_user_context),
 ) -> dict[str, Any]:
     effective_user_id = _effective_user_id(current_user, user_id)
-    _ensure_owner(get_session(conversation_id), effective_user_id, current_user)
+    if current_user.get("authenticated"):
+        ownership_guard.require_conversation_owner(conversation_id, _scope(current_user))
+    else:
+        _ensure_owner(get_session(conversation_id), effective_user_id, current_user)
     return {
         "success": True,
         "conversation_id": conversation_id,
@@ -184,7 +203,10 @@ def list_messages(
 def search_messages(conversation_id: str, payload: SearchMessagesRequest, current_user: dict = Depends(get_request_user_context)) -> dict[str, Any]:
     session = get_session(conversation_id)
     user_id = str((session or {}).get("user_id") or DEFAULT_USER_ID)
-    _ensure_owner(session, user_id, current_user)
+    if current_user.get("authenticated"):
+        ownership_guard.require_conversation_owner(conversation_id, _scope(current_user))
+    else:
+        _ensure_owner(session, user_id, current_user)
     keyword = str(payload.query or "").strip().lower()
     messages = get_recent_messages(conversation_id, limit=500)
     if keyword:

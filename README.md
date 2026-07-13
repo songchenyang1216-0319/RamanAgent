@@ -127,7 +127,10 @@ python -m venv .venv
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 Copy-Item .env.example .env
+# 如需本地免登录开发，再显式设置 ALLOW_ANONYMOUS_DEV=true
 python -m scripts.preflight_check
+python scripts/check_repo_secrets.py
+alembic upgrade head
 python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
@@ -156,10 +159,33 @@ docker compose -f docker-compose.dev.yml up --build
 
 ```powershell
 python scripts/check_env_safety.py
+python scripts/check_repo_secrets.py
 python -m scripts.preflight_check
 python -m pytest -q
 .\scripts\smoke_check.ps1
 ```
+
+生产/预发环境启动时会强制校验：
+
+- `AUTH_SECRET` 必须为 32 字符以上的非占位值。
+- `DEFAULT_ADMIN_PASSWORD` 不能使用 `admin/admin123` 等弱默认值。
+- `AGENT_RUNTIME_MODE=graph`。
+- `VECTOR_DB_PROVIDER` 和 `EMBEDDING_PROVIDER` 不能为 `mock`。
+- 本地匿名开发必须显式设置 `ALLOW_ANONYMOUS_DEV=true`，生产环境禁止设置。
+
+后台 worker 入口：
+
+```powershell
+python -m backend.tasks.worker
+```
+
+Celery worker 入口：
+
+```powershell
+celery -A backend.tasks.celery_app.celery_app worker --loglevel=INFO --concurrency=1
+```
+
+数据库迁移与部署说明见 `docs/database_migration.md`、`docs/authentication.md`、`docs/sse_recovery.md`、`docs/ownership_model.md` 和 `docs/deployment.md`。
 
 真实 Chroma + local embedding 手动验收：
 

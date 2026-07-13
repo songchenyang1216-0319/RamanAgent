@@ -12,6 +12,12 @@ storage
 outputs
 workspace
 data/raw
+backend/data/skill_uploads
+backend/data/uploaded_skills.json
+*.db
+*.sqlite
+*.sqlite3
+*.jsonl
 node_modules
 frontend/node_modules
 *.log

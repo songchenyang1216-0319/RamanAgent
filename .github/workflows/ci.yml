@@ -7,9 +7,15 @@ on:
 
 jobs:
   smoke:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     env:
       PYTHONDONTWRITEBYTECODE: "1"
+      ALLOW_ANONYMOUS_DEV: "true"
+      AUTH_SECRET: "ci_auth_secret_value_for_tests_32_chars"
       VECTOR_DB_PROVIDER: mock
       EMBEDDING_PROVIDER: mock
       OCR_PROVIDER: none
@@ -25,6 +31,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Repository secret scan
+        run: python scripts/check_repo_secrets.py
       - name: Install Python dependencies
         run: python -m pip install -r requirements.txt
       - name: Smoke checks

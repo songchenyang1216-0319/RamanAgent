@@ -14,6 +14,11 @@ import backend.services.task_trace_manager as task_trace_module
 
 def _configure_phase2_sandbox(tmp_path, monkeypatch):
     monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("AUTH_SECRET", "phase2_auth_test_secret_value_32_chars")
+    monkeypatch.setenv("DEFAULT_ADMIN_PASSWORD", "ProdAdminPass123!")
+    monkeypatch.setenv("AGENT_RUNTIME_MODE", "graph")
+    monkeypatch.setenv("VECTOR_DB_PROVIDER", "chroma")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
     sandbox_root = PROJECT_ROOT / ".pytest-tmp" / f"{tmp_path.name}_phase2_auth"
     workspace_root = sandbox_root / "workspace"
     storage_root = sandbox_root / "storage"
@@ -72,7 +77,7 @@ def _configure_phase2_sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(report_api.report_export_service.report_registry, "reports_path", reports_path)
 
 
-def _register_and_login(client: TestClient, username: str, password: str = "123456") -> dict:
+def _register_and_login(client: TestClient, username: str, password: str = "UnitTestPass123!") -> dict:
     response = client.post("/api/auth/register", json={"username": username, "password": password})
     assert response.status_code == 200
     return response.json()
@@ -88,8 +93,8 @@ def test_auth_register_login_and_project_binding(tmp_path, monkeypatch):
 
     stored_user = auth_dependencies.user_service.get_user_by_username("demo_user")
     assert stored_user is not None
-    assert stored_user["password_hash"] != "123456"
-    assert "123456" not in stored_user["password_hash"]
+    assert stored_user["password_hash"] != "UnitTestPass123!"
+    assert "UnitTestPass123!" not in stored_user["password_hash"]
 
     me = client.get("/api/auth/me", headers=headers)
     assert me.status_code == 200

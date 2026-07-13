@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import time
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -102,7 +102,7 @@ class RamanPipelineRunner:
             "steps": [step.model_dump() for step in expanded.steps] if expanded else [],
         }
 
-    def run(self, request: PipelineRequest) -> PipelineResult:
+    def run(self, request: PipelineRequest, cancellation_checker: Callable[[], bool] | None = None) -> PipelineResult:
         expanded = self.expand_request(request)
         run_id = uuid.uuid4().hex[:12]
         started = time.perf_counter()
@@ -112,6 +112,8 @@ class RamanPipelineRunner:
         artifacts: list[dict[str, Any]] = []
 
         for index, step in enumerate(expanded.steps, start=1):
+            if cancellation_checker is not None and cancellation_checker():
+                raise InterruptedError("任务已请求取消。")
             spec = self.registry.get(step.algorithm_id)
             step_id = step.step_id or f"{index:02d}_{step.algorithm_id}"
             input_shape = _shape(data)
@@ -155,6 +157,8 @@ class RamanPipelineRunner:
 
             try:
                 output: AlgorithmRunOutput = self.registry.handler(step.algorithm_id)(data, params)
+                if cancellation_checker is not None and cancellation_checker():
+                    raise InterruptedError("任务已请求取消。")
                 data.update(output.data or {})
                 step_artifacts = list(output.artifacts or [])
                 plot = save_spectrum_plot(data, run_id, step_id, spec.display_name)
@@ -177,6 +181,8 @@ class RamanPipelineRunner:
                     elapsed_ms=int((time.perf_counter() - step_started) * 1000),
                 )
                 step_results.append(result)
+            except InterruptedError:
+                raise
             except RamanPipelineError as exc:
                 error = str(exc)
                 result = PipelineStepResult(
@@ -258,4 +264,3 @@ class RamanPipelineRunner:
         if request.save_history:
             self.store.append_history(result.model_dump())
         return result
-

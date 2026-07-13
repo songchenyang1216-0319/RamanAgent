@@ -11,6 +11,8 @@ services:
       BACKEND_HOST: 0.0.0.0
       BACKEND_PORT: 8000
       DATABASE_URL: sqlite:////app/storage/agent_memory.db
+      ALLOW_ANONYMOUS_DEV: "true"
+      TASK_QUEUE_BACKEND: local
       VECTOR_DB_PROVIDER: mock
       EMBEDDING_PROVIDER: mock
       OCR_PROVIDER: none
